@@ -25,7 +25,7 @@ import httpx
 import config
 from assistant import webutil
 
-logger = logging.getLogger("The Crate")
+logger = logging.getLogger("thecrate.vinyl_stores")
 
 # Several shops 403 a default client, so use the shared browser-like UA. Per-shop
 # timeouts keep one slow shop from stalling the whole search (adapters run concurrently).

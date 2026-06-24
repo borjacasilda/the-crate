@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 
-logger = logging.getLogger("The Crate")
+logger = logging.getLogger("thecrate.discogs")
 
 BASE = "https://api.discogs.com"
 USER_AGENT = "TheCrate/0.1 +https://github.com/thecrate"

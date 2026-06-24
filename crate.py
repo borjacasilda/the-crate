@@ -49,6 +49,7 @@ analyze.py and database.py interfaces that you should verify.
 import argparse
 import json
 import logging
+import logging.handlers
 import subprocess
 import sys
 import uuid
@@ -92,7 +93,9 @@ def _setup_file_logging() -> None:
         # Our handler is marked so a second import is a no-op.
         if getattr(h, "_thecrate_crate_file", False):
             return
-    handler = logging.FileHandler(APP_LOG, mode="a", encoding="utf-8")
+    # Rotating so app.log self-caps (L6): 5 MB x 3 backups, never needs manual clearing.
+    handler = logging.handlers.RotatingFileHandler(
+        APP_LOG, mode="a", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
     handler._thecrate_crate_file = True  # type: ignore[attr-defined]  # dedup marker
     # Timestamped + grep-friendly: "<ts> [thecrate.crate] INFO add SUCCESS ...".
     handler.setFormatter(logging.Formatter(

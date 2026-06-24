@@ -62,15 +62,24 @@ logger = logging.getLogger("thecrate")
 
 @asynccontextmanager
 async def _lifespan(app):
-    """Startup: ensure the archive dir exists and probe MP3 write support."""
+    """Startup: cap the threadpool to the DB pool, ensure dirs, probe MP3 support."""
     global MP3_SUPPORTED
+    # Cap the AnyIO worker threadpool that runs our sync `def` routes so concurrent
+    # DB-bound requests can't outnumber the connection pool and trigger PoolError
+    # (H4). Leave a few connections for the listener / analysis / MCP background
+    # threads that borrow from the same pool. Both sides move together via the
+    # THECRATE_DB_POOL_MAX knob.
+    import anyio
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = max(1, database.POOL_MAX - 4)
     config.RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import soundfile as sf
         MP3_SUPPORTED = "MP3" in sf.available_formats()
     except Exception:
         MP3_SUPPORTED = False
-    logger.info("api START recordings_dir=%s mp3=%s",
+    logger.info("api START threadpool=%d db_pool=%d recordings_dir=%s mp3=%s",
+                limiter.total_tokens, database.POOL_MAX,
                 config.RECORDINGS_DIR, MP3_SUPPORTED)
     yield
 

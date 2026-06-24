@@ -65,6 +65,12 @@ def test_tools():
 def test_agent_tool_wiring():
     # MOCK model: PydanticAI's TestModel drives the agent through its tools
     # without any real LLM — proves the tools are registered and callable.
+    # TestModel invokes EVERY registered tool, and several run real DB queries
+    # (similar_labels, metadata_search, …) that raise when Postgres is down — so
+    # skip cleanly without a DB, exactly like test_tools above (keeps CI green).
+    if not database.DB_AVAILABLE:
+        print("  ⚠ DB down — skipping agent tool-wiring (TestModel hits DB-backed tools)")
+        return
     from pydantic_ai.models.test import TestModel
     a = agent._build_agent("qwen3:4b")           # tag irrelevant; model is overridden
     with a.override(model=TestModel()):

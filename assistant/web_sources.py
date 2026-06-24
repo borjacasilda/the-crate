@@ -28,7 +28,7 @@ import httpx
 import config
 from assistant import webutil
 
-logger = logging.getLogger("The Crate")
+logger = logging.getLogger("thecrate.web_sources")
 
 # RA needs a browser-like UA + Referer (Cloudflare-fronted; the GraphQL endpoint expects
 # a site-like request). The UA itself is shared with the other web adapters (webutil.UA).

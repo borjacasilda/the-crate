@@ -22,7 +22,7 @@ import config
 import database
 import discogs
 
-logger = logging.getLogger("The Crate")
+logger = logging.getLogger("thecrate.enrich")
 
 
 def _parse(filename: str) -> tuple:

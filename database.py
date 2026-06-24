@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import psycopg2
 import psycopg2.extras
@@ -54,15 +55,28 @@ load_dotenv()  # Pull DB credentials from .env into os.environ. Never hardcode.
 # knobs (where to reach the container); the POSTGRES_* trio matches what the
 # container initialises itself with.
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
+    "host": os.getenv("DB_HOST", "127.0.0.1"),
     "port": os.getenv("DB_PORT", "5432"),
     "dbname": os.getenv("POSTGRES_DB", "vinylid"),
     "user": os.getenv("POSTGRES_USER", "vinylid"),
     "password": os.getenv("POSTGRES_PASSWORD", ""),
 }
 
-POOL_MIN = 1   # Always keep one warm connection ready.
-POOL_MAX = 5   # Cap concurrency — the analysis pipeline is the heavy writer.
+def _int_env(name: str, default: int, lo: int, hi: int) -> int:
+    """Read a positive-int env knob, clamped to [lo, hi]; bad/absent → default."""
+    try:
+        return max(lo, min(hi, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+# Pool sizing is a THECRATE_* knob (H4). FastAPI runs sync DB-bound routes in a
+# threadpool; a pool smaller than that concurrency raises PoolError ("connection
+# pool exhausted") and 500s requests. The default 20 covers api.py's threadpool
+# cap (POOL_MAX - 4, set in its lifespan) plus headroom for the listener /
+# analysis / MCP background threads that also borrow connections.
+POOL_MIN = _int_env("THECRATE_DB_POOL_MIN", 1, 1, 100)
+POOL_MAX = _int_env("THECRATE_DB_POOL_MAX", 20, POOL_MIN, 500)
 
 # HNSW build/search tuning. Defaults are pgvector's; exposed here so they live
 # next to the index DDL that consumes them rather than as magic numbers.
@@ -77,8 +91,13 @@ HNSW_EF_CONSTRUCTION = 64  # Candidate list size at build time — higher = bett
 # guard. After that they are read-only for the life of the process.
 DB_AVAILABLE = False          # Flipped True only after a successful connect + db_init.
 _pool = None                  # psycopg2.pool.ThreadedConnectionPool | None.
-_init_lock = threading.Lock()  # Guards the one-time init against concurrent imports.
-_initialised = False           # Sentinel so _ensure_initialised() runs db_init once.
+_init_lock = threading.Lock()  # Guards init/reconnect against concurrent callers.
+_initialised = False           # True once the first connect has been attempted.
+_last_connect_attempt = 0.0    # monotonic ts of the last attempt — throttles retries.
+try:                           # Seconds to back off before retrying a down DB (H3).
+    RECONNECT_THROTTLE_SEC = max(0.0, float(os.getenv("THECRATE_DB_RECONNECT_THROTTLE", "5")))
+except (TypeError, ValueError):
+    RECONNECT_THROTTLE_SEC = 5.0
 
 
 class DBUnavailableError(RuntimeError):
@@ -101,18 +120,24 @@ class DBUnavailableError(RuntimeError):
 #  CONNECTION MANAGEMENT
 # ════════════════════════════════════════════════════════════
 def _connect() -> None:
-    """Build the connection pool and run first-time schema init.
+    """Build (or rebuild) the connection pool and run schema init if needed.
 
-    Idempotent and thread-safe: the first caller to acquire `_init_lock` does
-    the work; everyone else sees `_initialised` already True and returns. On any
-    failure we log CRITICAL and leave DB_AVAILABLE = False so the whole module
-    fails loud rather than half-initialised.
+    Thread-safe via `_init_lock`. Returns immediately when a pool already exists.
+    Otherwise it attempts a connect — but at most once every
+    RECONNECT_THROTTLE_SEC, so a persistently-down Postgres is not hammered on
+    every operation. That throttled retry is what lets the app recover on its own
+    once Postgres comes back (H3) instead of needing a manual restart. On failure
+    we log CRITICAL and leave DB_AVAILABLE = False so the module fails loud.
     """
-    global _pool, DB_AVAILABLE, _initialised
-    with _init_lock:                      # Serialise concurrent first-imports.
-        if _initialised:                  # Someone already (succeeded or) tried.
+    global _pool, DB_AVAILABLE, _initialised, _last_connect_attempt
+    with _init_lock:                      # Serialise concurrent (re)connects.
+        if _pool is not None:             # Already connected — nothing to do.
             return
-        _initialised = True               # Mark attempted up-front — never retry-loop.
+        now = time.monotonic()
+        if _initialised and (now - _last_connect_attempt) < RECONNECT_THROTTLE_SEC:
+            return                        # Backed off after a recent failed attempt.
+        _initialised = True
+        _last_connect_attempt = now
         try:
             # ThreadedConnectionPool is the right pool here: The Crate's listener and
             # analysis pipeline can issue queries from different threads, and this
@@ -131,6 +156,44 @@ def _connect() -> None:
             logger.critical(
                 "Postgres unreachable — The Crate will not persist anything. "
                 "Start Docker (`docker compose up -d`). Cause: %s", e)
+
+
+def _conn_alive(conn) -> bool:
+    """Liveness probe before a pooled connection is handed to a caller.
+
+    A Postgres restart leaves every pooled socket broken but still sitting in the
+    free list, and psycopg2 would keep dealing them out. We roll back first (which
+    also clears any 'current transaction is aborted' state from a prior error) and
+    run `SELECT 1`; only a connection that answers is considered usable.
+    """
+    if conn.closed:
+        return False
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return True
+    except psycopg2.Error:
+        return False
+
+
+def _get_live_conn():
+    """Borrow a *live* connection, discarding any the server has killed (H3).
+
+    Loops at most one full pool over: each dead connection is dropped with
+    close=True (so the pool replaces it with a fresh one on the next getconn)
+    until a live one is found. A hard connect failure becomes the standard
+    DBUnavailableError so callers see one consistent, actionable error.
+    """
+    for _ in range(POOL_MAX + 1):
+        try:
+            conn = _pool.getconn()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            raise DBUnavailableError(str(e))
+        if _conn_alive(conn):
+            return conn
+        _pool.putconn(conn, close=True)   # Dead → discard; next getconn makes a fresh one.
+    raise DBUnavailableError("no live connection available")
 
 
 class _transaction:
@@ -157,23 +220,40 @@ class _transaction:
     def __enter__(self):
         # Guard here too: callers may use the CM directly without a decorator.
         if not DB_AVAILABLE or _pool is None:
+            _connect()                    # Lazy, throttled reconnect if Postgres came back.
+        if not DB_AVAILABLE or _pool is None:
             raise DBUnavailableError()
-        self._conn = _pool.getconn()
+        self._conn = _get_live_conn()     # Proven-alive connection (survives a PG restart).
         factory = psycopg2.extras.RealDictCursor if self._dict_rows else None
         self._cur = self._conn.cursor(cursor_factory=factory)
         return self._cur
 
     def __exit__(self, exc_type, exc, tb):
+        broken = False
         try:
             if exc_type is None:
                 self._conn.commit()       # Clean exit → persist.
             else:
-                self._conn.rollback()     # Any exception → undo partial work.
+                # A connection-level error means the socket is dead: don't roll back
+                # on it (that just raises again) and flag it for disposal below.
+                broken = (self._conn.closed != 0 or
+                          issubclass(exc_type, (psycopg2.OperationalError,
+                                                psycopg2.InterfaceError)))
+                if not broken:
+                    self._conn.rollback() # Recoverable error → undo partial work.
                 logger.error("Transaction rolled back: %s", exc, exc_info=True)
+        except psycopg2.Error:
+            broken = True                 # commit/rollback itself failed → dead connection.
         finally:
             if self._cur is not None:
-                self._cur.close()
-            _pool.putconn(self._conn)     # ALWAYS return the connection.
+                try:
+                    self._cur.close()
+                except psycopg2.Error:
+                    pass
+            # Discard a dead connection instead of poisoning the pool with it (H3) —
+            # otherwise the next borrower inherits the broken socket after a Postgres
+            # restart and the app never recovers without a manual restart.
+            _pool.putconn(self._conn, close=broken)
         return False                      # Never suppress exceptions.
 
 

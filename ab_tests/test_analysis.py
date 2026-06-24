@@ -902,8 +902,8 @@ def test_camelot_and_keys() -> bool:
         check(analyze.to_camelot("A", "minor") == "8A", "A minor → 8A")
         check(analyze.to_camelot("C", "major") == "8B", "C major → 8B")
         check(analyze.to_camelot("Bb", "major") == "6B", "Bb major → 6B (enharmonic)")
-        check(analyze.to_camelot("???", "minor") == "5A",
-              "unknown key collapses to KEY_INDEX default 0 → 5A")
+        check(analyze.to_camelot("???", "minor") == "?",
+              "unknown key → '?' sentinel (was: collapsed to index 0 → 5A)")
 
         # ── key_relationship_label: every branch that can actually fire ──
         check(analyze.key_relationship_label("8A", "8A") == "Same key", "8A/8A = Same key")

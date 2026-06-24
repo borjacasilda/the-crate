@@ -130,7 +130,7 @@ def to_camelot(key: str, scale: str) -> str:
     Returns:
         Camelot code (e.g. '8B') or '?' if the pair is unknown.
     """
-    return CAMELOT.get((KEY_INDEX.get(key, 0), scale), '?')
+    return CAMELOT.get((KEY_INDEX.get(key), scale), '?')
 
 
 def camelot_energy_direction(c1: str, c2: str) -> int:

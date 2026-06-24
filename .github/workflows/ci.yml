@@ -1,10 +1,10 @@
 name: CI
 
-# Fast, dependency-light checks that run reliably on every push/PR:
-#   - ruff: catch real errors (syntax, undefined names) without style noise
-#   - compileall: every module byte-compiles
-# The full test suites (ab_tests/) need PostgreSQL + Essentia models + Ollama, so
-# they are run locally / in a dedicated environment, not here. See CONTRIBUTING.md.
+# Two jobs:
+#   lint  — fast, dependency-light: ruff (real errors only) + byte-compile every module.
+#   test  — installs the locked deps with uv, then proves the engine actually imports and
+#           runs the suites that need no PostgreSQL / Essentia models / Ollama. The DB- and
+#           model-backed suites still run locally (they need a live stack); see CONTRIBUTING.md.
 
 on:
   push:
@@ -29,3 +29,31 @@ jobs:
         # Python-2 files that don't byte-compile (e.g. Essentia's extractor scripts). CI's
         # fresh checkout has no .venv, so this is a no-op there but keeps local runs clean.
         run: python -m compileall -q -x '\.venv' .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync dependencies (locked)
+        # --frozen fails if pyproject.toml and uv.lock have drifted, so CI also guards
+        # the lockfile. Installs essentia/tensorflow/pydantic-ai exactly as pinned.
+        run: uv sync --frozen
+      - name: Import smoke test (engine imports without a DB)
+        # Catches import-time breakage — circular imports, bad signatures, missing deps —
+        # that ruff/compileall can't see (they never execute module bodies). No DB needed:
+        # database stays importable with DB_AVAILABLE=False when Postgres is absent.
+        # api/recorder/listener are left out: importing them pulls PortAudio (sounddevice),
+        # which isn't installed on the CI runner.
+        run: uv run python -c "import config, database, analyze, crate, enrich, discogs; print('engine import OK')"
+      - name: Dependency-free test suites (no DB / models / Ollama)
+        # test_scoring drives the scorer with synthetic TrackFeatures; test_assistant
+        # self-skips its DB-backed checks and exercises the agent with PydanticAI's mock
+        # TestModel (no Ollama). Both exit non-zero on a failed assertion, failing the job.
+        run: |
+          uv run python ab_tests/test_scoring.py
+          uv run python ab_tests/test_assistant.py
