@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Collection</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  .topbar { display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem; flex-wrap: wrap; }
+  .topbar .right { display: flex; align-items: center; gap: 1rem; }
+  .topbar a.docs { font-size: .62rem; text-transform: uppercase; letter-spacing: .18em; }
+  /* Slim inline health readout (not the full-width status bar). */
+  .topbar .status { border: none; background: none; padding: 0; font-size: .66rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+          gap: .8rem; margin-top: 1.5rem; }
+  .card { aspect-ratio: 1 / 1; border: 1px solid var(--line); background: var(--surface);
+          padding: 1.1rem; display: flex; flex-direction: column;
+          justify-content: space-between; color: var(--text);
+          transition: border-color .15s, transform .18s, box-shadow .18s; }
+  .card:hover { border-color: var(--text); color: var(--text);
+                transform: translateY(-3px); box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+  .card .name { font-weight: 700; font-size: .95rem; word-break: break-word;
+                text-transform: uppercase; letter-spacing: .08em; line-height: 1.3; }
+  .card .desc { font-size: .74rem; color: var(--mute); overflow: hidden;
+                display: -webkit-box; -webkit-line-clamp: 3;
+                -webkit-box-orient: vertical; margin-top: .5rem; flex: 1; }
+  .card .meta { margin-top: .6rem; }
+  .card .badge { margin-top: .5rem; }
+  .card.new { border-style: dashed; border-color: var(--line-strong);
+              align-items: center; justify-content: center; color: var(--mute);
+              font-size: .72rem; text-transform: uppercase; letter-spacing: .2em;
+              text-align: center; }
+  .card.new:hover { border-color: var(--red); color: var(--red);
+                    transform: translateY(-3px); box-shadow: none; }
+  /* Delete handle: top-right, only on card hover. */
+  .card { position: relative; }
+  .card .del { position: absolute; top: .4rem; right: .5rem; width: 1.4rem; height: 1.4rem;
+               display: flex; align-items: center; justify-content: center;
+               font-size: .8rem; line-height: 1; color: var(--mute); cursor: pointer;
+               border: 1px solid transparent; opacity: 0; transition: opacity .12s, color .12s, border-color .12s; }
+  .card:hover .del { opacity: 1; }
+  .card .del:hover { color: var(--red); border-color: var(--red); }
+  /* Default crate = the master LIBRARY (Vinyl Collection): inverted — white fill,
+     black ink — so it never reads as just another maleta. */
+  .card.library { background: #fff; border-color: #fff; color: #000; }
+  .card.library .name { color: #000; }
+  .card.library .desc { color: #333; }
+  .card.library .meta, .card.library .badge { color: #222; }
+  .card.library:hover { border-color: #fff; box-shadow: 0 12px 32px rgba(255,255,255,.18); }
+  /* Delete confirmation now uses the shared confirmDialog() from ui.js. */
+  /* Quick-nav buttons share the crate grid's columns → same width as the cards below. */
+  .crate-nav { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+               gap: .8rem; margin-top: 1.5rem; }
+  /* These three are the RED accent buttons; crate cards keep their default colours. */
+  .crate-nav .btn { width: 100%; box-sizing: border-box; text-align: center;
+                    color: var(--red); border-color: var(--red); }
+  .crate-nav .btn:hover { background: var(--red); border-color: var(--red); color: #000; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1 class="brand">THE <b>CRATE</b></h1>
+  <div class="right">
+    <span class="status" id="health">…</span>
+    <a class="docs" href="/docs" target="_blank">API docs</a>
+  </div>
+</div>
+<!-- Collection-level quick nav: same buttons/style/behaviour as inside a crate,
+     but collection-wide (no crate preselected). -->
+<div class="crate-nav">
+  <a class="btn" href="/listen">Live Mode</a>
+  <a class="btn" href="/sessions">Sessions</a>
+  <a class="btn" href="/discogs" title="Enrich metadata from Discogs: label, year, styles and cover art + confirm doubtful matches">Enrich</a>
+</div>
+<div class="grid" id="grid"></div>
+<div class="err" id="err"></div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script>
+
+async function loadHealth(){
+  try {
+    const h = await j('/health');
+    document.getElementById('health').innerHTML =
+      `DB <span class="${h.db?'ok':'bad'}">${h.db?'on':'off'}</span> · ` +
+      `L<span class="${h.pipeline_level>=5?'ok':''}">${h.pipeline_level}</span>/5 · ` +
+      `in ${h.input_devices}`;
+  } catch(e){ document.getElementById('health').innerHTML = '<span class="bad">API off</span>'; }
+}
+
+async function load(){
+  const grid = document.getElementById('grid');
+  try {
+    const crates = await j('/crates', { headers: { 'Accept': 'application/json' } });
+    grid.innerHTML = '';
+    for (const c of crates){
+      const a = document.createElement('a');
+      a.className = 'card';
+      // The default crate is the master LIBRARY (Vinyl Collection), not a maleta —
+      // inverted card (white fill / black ink) so it reads as "everything lives here".
+      if (c.is_default) a.classList.add('library');
+      a.href = `/crate?id=${c.crate_id}`;
+      const bpm = (c.bpm_lo != null) ? ` · ${Math.round(c.bpm_lo)}–${Math.round(c.bpm_hi)} BPM` : '';
+      a.innerHTML =
+        `<div><div class="name">${esc(c.name)}</div>` +
+        (c.genre ? `<span class="badge">${esc(c.genre)}</span>` : '') + `</div>` +
+        `<div class="desc">${esc(c.description || '')}</div>` +
+        `<div class="meta">${c.n_tracks} tracks${c.n_tracks - c.n_analyzed > 0 ? ` · ${c.n_tracks - c.n_analyzed} unanalyzed` : ''}${bpm}</div>`;
+      // Delete handle on every card except the default (the safety net).
+      if (!c.is_default){
+        const del = document.createElement('span');
+        del.className = 'del'; del.textContent = '✕'; del.title = 'Delete crate';
+        del.onclick = e => { e.preventDefault(); e.stopPropagation(); askDelete(c); };
+        a.appendChild(del);
+      }
+      grid.appendChild(a);
+    }
+    const plus = document.createElement('a');
+    plus.className = 'card new';
+    plus.href = '/crate/new';
+    plus.textContent = '＋ New crate';
+    grid.appendChild(plus);
+  } catch(e){ document.getElementById('err').textContent = 'Could not load crates: ' + e.message; }
+}
+
+/* ── delete crate: hover ✕ → shared confirmDialog (ui.js) → DELETE ── */
+async function askDelete(c){
+  const ok = await confirmDialog({
+    title: 'Delete crate?',
+    body: `“${c.name}” (${c.n_tracks} track${c.n_tracks === 1 ? '' : 's'}). Its tracks are kept — `
+        + `they stay in your default crate.`,
+    confirmLabel: 'Delete crate', danger: true });
+  if (!ok) return;
+  try {
+    await j(`/crates/${c.crate_id}`, { method: 'DELETE' });
+    toast('Crate deleted');
+    load();                       // refresh the grid
+  } catch(e){ toast('Could not delete crate: ' + e.message, { type: 'bad' }); }
+}
+
+loadHealth(); load();
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

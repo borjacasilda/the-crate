@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — New crate</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  body { max-width: 560px; }
+  textarea { min-height: 90px; resize: vertical; }
+  .submit { margin-top: 1.6rem; }
+</style>
+</head>
+<body>
+<a class="back" href="/crates">← Collection</a>
+<h1>New crate</h1>
+
+<label>Name</label>
+<input type="text" id="name" placeholder="e.g. Techno 2015 — Pole Group">
+
+<label>Crate info</label>
+<textarea id="desc" placeholder="Era, vibe, source… (optional)"></textarea>
+
+<label>Style</label>
+<select id="genre"></select>
+<div class="hint" id="bpmHint"></div>
+
+<p class="submit"><button class="btn primary" id="createBtn">Create crate</button></p>
+<div class="err" id="err"></div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let GENRES = [];
+
+async function init(){
+  GENRES = await j('/genres');
+  const sel = $('genre');
+  for (const g of GENRES){
+    const o = document.createElement('option');
+    o.value = g.genre; o.textContent = g.genre;
+    if (g.genre === 'techno') o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.onchange = showBpm; showBpm();
+}
+function showBpm(){
+  const g = GENRES.find(x => x.genre === $('genre').value);
+  $('bpmHint').textContent = g ?
+    `Tempo prior for analysis: ${Math.round(g.bpm_lo)}–${Math.round(g.bpm_hi)} BPM ` +
+    `(until the crate learns its own stats with 10+ tracks)` : '';
+}
+
+$('createBtn').onclick = async () => {
+  $('err').textContent = '';
+  const name = $('name').value.trim();
+  if (!name){ $('err').textContent = 'Name is required.'; return; }
+  try {
+    const r = await j('/crates', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name, genre: $('genre').value, description: $('desc').value.trim() }) });
+    location.href = `/crate?id=${r.crate_id}`;
+  } catch(e){ $('err').textContent = e.message; }
+};
+
+init().catch(e => $('err').textContent = 'API no responde: ' + e.message);
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

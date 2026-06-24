@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Discogs</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  body { max-width: 860px; }
+  .bar { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+         border: 1px solid var(--line); border-left: 3px solid var(--red);
+         background: var(--surface); padding: .8rem 1.1rem; margin: 1rem 0; }
+  .bar .stat { font-family: var(--mono); font-size: .72rem; color: var(--dim); }
+  .bar .stat b { color: var(--text); }
+  .bar .spacer { flex: 1; }
+  .warn { border-left-color: #ffb300; }
+  .warn .stat { color: #ffb300; }
+  #log { font-family: var(--mono); font-size: .7rem; color: var(--dim);
+         white-space: pre-wrap; max-height: 200px; overflow: auto; margin: .6rem 0; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em;
+       color: var(--dim); margin-top: 2rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+  .qtrack { border: 1px solid var(--line); background: var(--surface); padding: .8rem 1rem; margin-top: .8rem; }
+  .qtrack .fn { font-weight: 700; }
+  .qtrack .conf { font-family: var(--mono); font-size: .68rem; color: var(--dim); }
+  .cands { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .7rem; }
+  .cand { display: flex; gap: .5rem; align-items: center; border: 1px solid var(--line);
+          padding: .4rem .5rem; max-width: 360px; }
+  .cand img { width: 44px; height: 44px; object-fit: cover; border: 1px solid var(--line); background: #000; }
+  .cand .ct { font-size: .76rem; line-height: 1.35; }
+  .cand .cm { font-family: var(--mono); font-size: .64rem; color: var(--dim); }
+  .cand button { font-size: .64rem; text-transform: uppercase; letter-spacing: .06em;
+                 padding: .3rem .5rem; cursor: pointer; border: 1px solid var(--text);
+                 background: transparent; color: var(--text); white-space: nowrap; }
+  .cand button:hover { border-color: var(--red); color: var(--red); }
+  .qtrack .skip { float: right; background: transparent; border: 1px solid var(--line);
+                  color: var(--dim); font-size: .64rem; text-transform: uppercase;
+                  letter-spacing: .06em; padding: .3rem .5rem; cursor: pointer; }
+</style>
+</head>
+<body>
+<a class="back" href="/crates">← Collection</a>
+<h1>Discogs enrichment</h1>
+
+<div class="bar" id="statusBar">
+  <span class="stat" id="cfg">checking…</span>
+  <span class="spacer"></span>
+  <button class="btn primary" id="runBtn" disabled>Enrich collection</button>
+</div>
+<div id="log"></div>
+<div class="err" id="err"></div>
+
+<h2>Review queue <span class="conf" id="qcount"></span></h2>
+<p class="hint">Doubtful matches — pick the right release or skip. Strong matches are applied automatically.</p>
+<div id="queue"></div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+async function loadStatus(){
+  const s = await j('/discogs/status');
+  const c = s.counts;
+  if (!s.configured){
+    $('statusBar').classList.add('warn');
+    $('cfg').innerHTML = 'Discogs not configured — add a valid <b>DISCOGS_ACCESS_TOKEN</b> to .env';
+    $('runBtn').disabled = true;
+  } else {
+    $('statusBar').classList.remove('warn');
+    $('cfg').innerHTML = `<b>${c.matched + c.confirmed}</b> matched · ` +
+      `<b>${c.doubtful}</b> doubtful · <b>${c.unmatched}</b> unmatched · ` +
+      `<b>${s.pending}</b> pending`;
+    $('runBtn').disabled = s.pending === 0;
+    $('runBtn').textContent = s.pending ? `Enrich ${s.pending} pending` : 'Nothing pending';
+  }
+  return s;
+}
+
+/* run enrichment, streaming progress */
+$('runBtn').onclick = async () => {
+  $('runBtn').disabled = true; $('err').textContent = ''; $('log').textContent = '';
+  try {
+    const r = await fetch('/discogs/enrich', { method:'POST' });
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true){
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream:true });
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const p of parts){
+        const line = p.split('\n').find(l => l.startsWith('data: ')); if (!line) continue;
+        const e = JSON.parse(line.slice(6));
+        if (e.done){ $('log').textContent += `\n✓ done — ${JSON.stringify(e.counts)}\n`; }
+        else { $('log').textContent += `[${e.i}/${e.n}] ${e.status.padEnd(9)} ${e.filename}\n`; }
+        $('log').scrollTop = $('log').scrollHeight;
+      }
+    }
+  } catch(e){ $('err').textContent = e.message; }
+  await loadStatus(); await loadQueue();
+};
+
+async function loadQueue(){
+  const data = await j('/discogs/queue?status=doubtful');
+  $('qcount').textContent = data.tracks.length ? `— ${data.tracks.length}` : '';
+  const wrap = $('queue');
+  if (!data.tracks.length){
+    wrap.innerHTML = '<div class="drop-hint">no doubtful matches to review</div>';
+    return;
+  }
+  wrap.innerHTML = '';
+  for (const t of data.tracks){
+    const div = document.createElement('div'); div.className = 'qtrack';
+    const conf = (t.confidence != null) ? ` · best ${(t.confidence*100).toFixed(0)}%` : '';
+    let cands = '';
+    for (const c of (t.candidates || [])){
+      const thumb = c.thumb || c.cover_image || '';
+      cands += `<div class="cand">` +
+        (thumb ? `<img loading="lazy" src="${esc(thumb)}" alt="">` : '') +
+        `<div><div class="ct">${esc(c.title || '')}</div>` +
+        `<div class="cm">${esc(c.label || '—')}${c.year ? ' · ' + c.year : ''}` +
+        `${c.score != null ? ' · ' + Math.round(c.score*100) + '%' : ''}</div></div>` +
+        `<button data-tid="${t.track_id}" data-rid="${c.release_id}">Use</button></div>`;
+    }
+    div.innerHTML =
+      `<button class="skip" data-tid="${t.track_id}">Skip</button>` +
+      `<div class="fn">${esc(t.filename)}</div>` +
+      `<div class="conf">doubtful${conf}</div>` +
+      `<div class="cands">${cands || '<span class="cm">no candidates</span>'}</div>`;
+    div.querySelectorAll('.cand button').forEach(b => b.onclick = async () => {
+      b.disabled = true; b.textContent = '…';
+      try {
+        await post('/discogs/confirm', { track_id: b.dataset.tid, release_id: Number(b.dataset.rid) });
+        await loadStatus(); await loadQueue();
+      } catch(e){ $('err').textContent = e.message; b.disabled = false; b.textContent = 'Use'; }
+    });
+    div.querySelector('.skip').onclick = async (e) => {
+      try { await fetch('/discogs/skip/' + e.target.dataset.tid, { method:'POST' });
+            await loadStatus(); await loadQueue(); }
+      catch(err){ $('err').textContent = err.message; }
+    };
+    wrap.appendChild(div);
+  }
+}
+
+loadStatus().then(loadQueue).catch(e => $('err').textContent = 'API not responding: ' + e.message);
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

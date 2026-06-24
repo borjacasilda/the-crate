@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Record vinyl</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  body { max-width: 640px; }
+  .hidden { display: none; }
+  .row { display: flex; gap: .75rem; } .row > div { flex: 1; }
+  .check { font-size: .8rem; color: var(--dim); margin: .55rem 0;
+           display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+  .check code { color: var(--mute); }
+  .state { font-weight: 600; font-size: .74rem; text-transform: uppercase;
+           letter-spacing: .2em; }
+  .result { margin-top: .8rem; }
+  .result td { padding: .3rem .9rem .3rem 0; border-bottom: none; font-size: .86rem; }
+  .result td:first-child { color: var(--mute); font-size: .62rem;
+           text-transform: uppercase; letter-spacing: .2em; }
+  #levelOut { font-size: .72rem; color: var(--mute); margin-top: .4rem; font-family: var(--mono); }
+  #startBtn { margin-top: 1.1rem; }
+  .input-src { font-family: var(--mono); font-size: .82rem; color: var(--text);
+               display: flex; align-items: center; gap: .5rem; }
+  .input-src .badge { flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<a href="/" id="backLink" class="back">← The Crate</a>
+<h1>Record vinyl</h1>
+<div id="crateCtx" class="meta hidden" style="margin-bottom:.5rem;"></div>
+
+<!-- ── STEP 1: form ───────────────────────────────────────── -->
+<div id="form">
+  <div class="row" id="crateRow">
+    <div>
+      <label>Crate</label>
+      <select id="crateSel"></select>
+    </div>
+    <div id="newCrateBox" class="hidden">
+      <label>New crate name</label>
+      <input type="text" id="newCrateName" placeholder="e.g. Hard groove">
+    </div>
+    <div id="newGenreBox" class="hidden">
+      <label>Genre</label>
+      <select id="newCrateGenre">
+        <option>techno</option><option>hard_techno</option><option>house</option>
+        <option>deep_house</option><option>electro</option><option>ambient</option><option>other</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="row">
+    <div><label>Artist</label><input type="text" id="artist" placeholder="Oscar Mulero"></div>
+    <div><label>Title</label><input type="text" id="title" placeholder="ZW Systems"></div>
+  </div>
+
+  <label>Audio input</label>
+  <!-- No selector: the source is auto-detected (interface > iPhone > Mac mic)
+       and re-scanned every few seconds, so plugging the interface in just
+       switches the line below. -->
+  <div class="row" style="align-items:center;">
+    <div class="input-src" id="inputSrc"><span class="mark">▌</span>detecting…</div>
+    <div style="flex:0 0 auto;">
+      <button class="btn" id="levelBtn" title="Captures 2s and measures the signal">Level test</button>
+    </div>
+  </div>
+  <div id="levelOut"></div>
+
+  <div class="check"><input type="checkbox" id="keepTake" checked>
+    <span>Archive the full take in <code>recordings/</code></span></div>
+  <!-- Mutually exclusive: one take, ONE archive format (radio group). -->
+  <div class="check" style="margin-left:1.5rem;">
+    <input type="radio" name="fmt" class="fmt" value="flac" checked> FLAC (archivo, recomendado)
+    <input type="radio" name="fmt" class="fmt" value="wav"> WAV
+    <input type="radio" name="fmt" class="fmt" value="mp3" id="mp3Chk"> MP3 320 (compartir)
+  </div>
+
+  <p><button class="btn primary" id="startBtn">● Start recording</button></p>
+  <div class="err" id="formErr"></div>
+</div>
+
+<!-- ── STEP 2: recording ──────────────────────────────────── -->
+<div id="recording" class="panel hidden">
+  <div class="meta"><span class="rec-dot">●</span> REC — <span id="recMeta"></span></div>
+  <div class="timer" id="timer">0:00</div>
+  <div class="vu" id="vu"><div></div></div>
+  <div class="meta" id="vuTxt"></div>
+  <p>
+    <button class="btn stop" id="stopBtn">■ STOP</button>
+    <button class="btn" id="cancelBtn">Discard take</button>
+  </p>
+</div>
+
+<!-- ── STEP 3: processing / result ────────────────────────── -->
+<div id="processing" class="panel hidden">
+  <div class="state" id="jobState">queued…</div>
+  <div class="meta" id="jobDetail"></div>
+  <div id="resultBox" class="hidden">
+    <table class="result">
+      <tr><td>Track</td><td id="rLabel"></td></tr>
+      <tr><td>BPM</td><td id="rBpm"></td></tr>
+      <tr><td>Key</td><td id="rKey"></td></tr>
+      <tr><td>Camelot</td><td id="rCam"></td></tr>
+      <tr><td>Pipeline level</td><td id="rLvl"></td></tr>
+      <tr><td>Files</td><td id="rFiles"></td></tr>
+    </table>
+    <p><button class="btn primary" onclick="location.reload()">Record another</button>
+       <a class="btn" href="/" id="doneLink" style="text-decoration:none;">Back</a></p>
+  </div>
+  <div class="err" id="jobErr"></div>
+</div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const NEW_CRATE = '__new__';
+// Crate context: arriving from /crate?id=X locks the destination — the form
+// then shows WHERE the take will land instead of asking again.
+const CRATE_CTX = new URLSearchParams(location.search).get('crate');
+let pollId = null;
+
+/* ── auto-detected input source (interface > iPhone > Mac mic) ── */
+let AUTO_DEV = null, inputPollId = null;
+const KIND_LABEL = { interface: 'Interface', iphone: 'iPhone · portable mic',
+                     builtin: 'Mac mic' };
+
+async function pollInput(){
+  try {
+    const d = await j('/devices/auto');
+    AUTO_DEV = d;
+    $('inputSrc').innerHTML = `<span class="mark">▌</span>${d.name} ` +
+      `<span class="badge">${KIND_LABEL[d.kind] || d.kind}</span>`;
+  } catch(e){
+    $('inputSrc').innerHTML = `<span class="mark">▌</span>no audio input`;
+  }
+}
+
+/* ── initial load: crates, mp3 support ── */
+async function init(){
+  const [crates, health] = await Promise.all([j('/crates', { headers: { 'Accept': 'application/json' } }), j('/health')]);
+  if (CRATE_CTX){
+    const c = crates.find(x => x.crate_id === CRATE_CTX);
+    if (c){
+      $('crateRow').classList.add('hidden');
+      $('crateCtx').classList.remove('hidden');
+      $('crateCtx').textContent = `Recording into crate: ${c.name} (${c.genre})`;
+      $('backLink').href = `/crate?id=${CRATE_CTX}`;
+      $('backLink').textContent = `← ${c.name}`;
+      $('doneLink').href = `/crate?id=${CRATE_CTX}`;
+    }
+  }
+  const cs = $('crateSel');
+  for (const c of crates){
+    const o = document.createElement('option');
+    o.value = c.name; o.textContent = `${c.name} (${c.n_tracks} tracks)`;
+    cs.appendChild(o);
+  }
+  const on = document.createElement('option');
+  on.value = NEW_CRATE; on.textContent = '+ New crate…';
+  cs.appendChild(on);
+  cs.onchange = () => {
+    const isNew = cs.value === NEW_CRATE;
+    $('newCrateBox').classList.toggle('hidden', !isNew);
+    $('newGenreBox').classList.toggle('hidden', !isNew);
+  };
+  if (!health.mp3_export){ $('mp3Chk').disabled = true;
+    $('mp3Chk').parentElement.title = 'libsndfile sin soporte MP3'; }
+  // Hot-plug awareness: re-detect the input source every few seconds while
+  // the form is on screen — plugging the interface in updates the line live.
+  await pollInput();
+  inputPollId = setInterval(pollInput, 4000);
+}
+
+/* ── level test (probes the auto-selected source) ── */
+$('levelBtn').onclick = async () => {
+  if (!AUTO_DEV){ $('levelOut').textContent = 'no audio input'; return; }
+  $('levelBtn').disabled = true; $('levelOut').textContent = 'measuring 2s…';
+  try {
+    const r = await j(`/devices/${AUTO_DEV.index}/level`);
+    $('levelOut').textContent =
+      `RMS ${r.rms} · peak ${r.peak} · ${r.clipping ? '⚠ CLIPPING' : r.verdict}`;
+  } catch(e){ $('levelOut').textContent = 'error: ' + e.message; }
+  $('levelBtn').disabled = false;
+};
+
+/* ── start recording ── */
+$('startBtn').onclick = async () => {
+  $('formErr').textContent = '';
+  const artist = $('artist').value.trim(), title = $('title').value.trim();
+  if (!artist || !title){ $('formErr').textContent = 'Artist and title are required.'; return; }
+  const formats = [...document.querySelectorAll('.fmt:checked')].map(c => c.value);
+  // No device_index: the backend auto-picks (interface > iPhone > Mac mic).
+  const body = { artist, title, keep_full_take: $('keepTake').checked, formats };
+  if (CRATE_CTX){
+    body.crate = CRATE_CTX;                       // Destination locked by the crate page.
+  } else if ($('crateSel').value === NEW_CRATE){
+    const name = $('newCrateName').value.trim();
+    if (!name){ $('formErr').textContent = 'Pon nombre al nuevo crate.'; return; }
+    body.new_crate = { name, genre: $('newCrateGenre').value };
+  } else { body.crate = $('crateSel').value; }
+  try {
+    await post('/recordings/start', body);
+    clearInterval(inputPollId);     // Device is committed for this take.
+    $('recMeta').textContent = `${artist} — ${title}`;
+    $('form').classList.add('hidden');
+    $('recording').classList.remove('hidden');
+    pollId = setInterval(pollRecording, 400);
+  } catch(e){ $('formErr').textContent = e.message; }
+};
+
+/* ── VU + timer while recording ── */
+async function pollRecording(){
+  try {
+    const s = await j('/recordings/current');
+    const m = Math.floor(s.elapsed_seconds / 60), sec = Math.floor(s.elapsed_seconds % 60);
+    $('timer').textContent = `${m}:${String(sec).padStart(2,'0')}`;
+    const pct = Math.min(100, Math.round(s.level_rms * 300));
+    $('vu').classList.toggle('clip', s.clipping);
+    $('vu').firstElementChild.style.width = pct + '%';
+    $('vuTxt').textContent = `RMS ${s.level_rms} · peak ${s.level_peak}` +
+      (s.clipping ? ' · ⚠ CLIPPING — lower the gain' : '');
+  } catch(e){ /* transient */ }
+}
+
+/* ── stop → job → analysis polling ── */
+$('stopBtn').onclick = async () => {
+  clearInterval(pollId);
+  try {
+    const r = await post('/recordings/current/stop');
+    $('recording').classList.add('hidden');
+    $('processing').classList.remove('hidden');
+    $('jobDetail').textContent = `take of ${r.take_seconds}s`;
+    pollJob(r.job_id);
+  } catch(e){ $('vuTxt').textContent = 'error stopping: ' + e.message; }
+};
+
+$('cancelBtn').onclick = async () => {
+  clearInterval(pollId);
+  try { await post('/recordings/current/cancel'); } catch(e){}
+  location.reload();
+};
+
+const STATES = { queued:'queued…', saving:'saving full take…',
+  ingesting:'standardizing (mono → 16 kHz → 120 s window)…',
+  analyzing:'analyzing (BPM, key, embeddings, levels 1-5)…',
+  done:'✓ done', failed:'✗ failed' };
+
+async function pollJob(id){
+  const tick = async () => {
+    const job = await j('/jobs/' + id);
+    $('jobState').textContent = STATES[job.state] || job.state;
+    if (job.state === 'done'){
+      const r = job.result;
+      $('rLabel').textContent = r.label;
+      $('rBpm').textContent  = r.bpm ? r.bpm.toFixed(1) : '—';
+      $('rKey').textContent  = r.key || '—';
+      $('rCam').textContent  = r.camelot || '—';
+      $('rLvl').textContent  = `L${r.pipeline_level}/5`;
+      $('rFiles').innerHTML  = (job.recordings || []).map(p => `<code>${p}</code>`).join('<br>') || 'solo extracto';
+      $('resultBox').classList.remove('hidden');
+      return;
+    }
+    if (job.state === 'failed'){ $('jobErr').textContent = job.error; return; }
+    setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+init().catch(e => $('formErr').textContent = 'API no responde: ' + e.message);
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

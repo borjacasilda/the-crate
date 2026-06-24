@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Knowledge</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  body { max-width: 760px; }
+  .gate-note { border: 1px solid var(--line); border-left: 3px solid var(--red);
+               background: var(--surface); padding: .8rem 1.1rem; margin: 1rem 0 1.6rem;
+               font-size: .82rem; color: var(--dim); line-height: 1.5; }
+  .gate-note b { color: var(--text); }
+  .tabs { display: flex; gap: .4rem; margin-bottom: 1rem; }
+  .tab { font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+         letter-spacing: .1em; padding: .5rem .9rem; border: 1px solid var(--line);
+         background: transparent; color: var(--dim); cursor: pointer; }
+  .tab.on { color: var(--text); border-color: var(--text); background: var(--surface); }
+  .pane { display: none; } .pane.on { display: block; }
+  textarea { min-height: 200px; resize: vertical; }
+  .drop { border: 1px dashed var(--line); background: var(--surface); padding: 2rem 1rem;
+          text-align: center; color: var(--dim); cursor: pointer; transition: border-color .15s; }
+  .drop:hover, .drop.over { border-color: var(--red); color: var(--text); }
+  .drop .big { font-family: var(--mono); font-size: .8rem; text-transform: uppercase;
+               letter-spacing: .12em; }
+  .drop .sub { font-size: .74rem; margin-top: .5rem; }
+  .submit { margin-top: 1.2rem; }
+  /* gate verdict banner */
+  .verdict { margin-top: 1rem; padding: .8rem 1.1rem; border: 1px solid var(--line);
+             font-size: .82rem; line-height: 1.5; display: none; }
+  .verdict.show { display: block; }
+  .verdict.ok { border-left: 3px solid #21d07a; }
+  .verdict.no { border-left: 3px solid var(--red); }
+  .verdict.work { border-left: 3px solid #ffb300; color: var(--dim); }
+  .verdict .reason { color: var(--dim); margin-top: .35rem; }
+  /* doc list */
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em;
+       color: var(--dim); margin-top: 2.4rem; border-top: 1px solid var(--line);
+       padding-top: 1.2rem; }
+  .doc { display: flex; align-items: baseline; justify-content: space-between;
+         gap: 1rem; border: 1px solid var(--line); background: var(--surface);
+         border-left: 3px solid var(--red); padding: .8rem 1.1rem; margin-top: .6rem; }
+  .doc .t { font-weight: 700; }
+  .doc .m { font-family: var(--mono); font-size: .7rem; color: var(--dim); margin-top: .3rem; }
+  .doc .chips { margin-top: .4rem; display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+  .chip { display: inline-block; font-family: var(--mono); font-size: .62rem;
+          text-transform: uppercase; letter-spacing: .08em; padding: .15rem .45rem;
+          border: 1px solid var(--line-strong); color: var(--dim); cursor: pointer; }
+  .chip:hover { border-color: var(--red); color: var(--red); }
+  .chip.cat { color: var(--text); border-color: var(--text); }
+  .chip.add { border-style: dashed; }
+  .doc .del { background: transparent; border: 1px solid var(--line); color: var(--dim);
+              font-size: .68rem; text-transform: uppercase; letter-spacing: .08em;
+              padding: .35rem .6rem; cursor: pointer; }
+  .doc .del:hover { border-color: var(--red); color: var(--red); }
+  .kbstat { font-family: var(--mono); font-size: .72rem; color: var(--dim); }
+  /* capacity gauge + full banner (rudimentary RAG size guard) */
+  .gauge { display: inline-flex; align-items: center; gap: .45rem; vertical-align: middle; }
+  .gauge .bar { width: 120px; height: 6px; background: var(--surface-2);
+                border: 1px solid var(--line); overflow: hidden; }
+  .gauge .bar > div { height: 100%; width: 0; background: var(--text); transition: width .25s; }
+  .gauge .bar > div.warn { background: #ffb300; }
+  .gauge .bar > div.full { background: var(--red); }
+  .cap-banner { display: none; border: 1px solid var(--red); background: var(--red-soft);
+                color: var(--text); padding: .85rem 1.1rem; margin: 0 0 1.4rem;
+                font-size: .82rem; line-height: 1.5; }
+  .cap-banner.show { display: block; }
+  .cap-banner b { color: var(--red); }
+  .filter-row { display: flex; gap: .6rem; align-items: center; margin: .8rem 0 .2rem; }
+  .filter-row select { width: auto; min-width: 160px; }
+  .verdict .chips { margin-top: .5rem; display: flex; flex-wrap: wrap; gap: .35rem; }
+</style>
+</head>
+<body>
+<a class="back" href="/crates">← Collection</a>
+<h1>Knowledge</h1>
+
+<div class="gate-note">
+  Feed the assistant written knowledge about music — artist bios, label histories,
+  scene notes, gear, production. The text is embedded and retrieved at chat time
+  to ground answers. <b>A music-relevance gate runs first:</b> the local model
+  reads each document and <b>anything not about music is refused — nothing
+  off-topic ever enters the knowledge base.</b>
+</div>
+
+<!-- Capacity guard: shown when the KB is full — must delete before adding more. -->
+<div class="cap-banner" id="capBanner"></div>
+
+<div class="tabs">
+  <button class="tab on" id="tabFile">Upload file</button>
+  <button class="tab" id="tabText">Paste text</button>
+  <button class="tab" id="tabUrl">Add web source</button>
+</div>
+
+<!-- FILE -->
+<div class="pane on" id="paneFile">
+  <div class="drop" id="drop">
+    <div class="big">Drop a file or click to choose</div>
+    <div class="sub" id="dropSub">.txt · .md · .pdf · .docx — from your machine</div>
+  </div>
+  <input type="file" id="file" accept=".txt,.md,.markdown,.pdf,.docx" hidden>
+  <div class="hint" id="fileName"></div>
+  <p class="submit"><button class="btn primary" id="ingestFile" disabled>Ingest file</button></p>
+</div>
+
+<!-- TEXT -->
+<div class="pane" id="paneText">
+  <label>Title <span class="hint" style="display:inline">— optional, auto-named if blank</span></label>
+  <input type="text" id="title" placeholder="e.g. Underground Resistance — label history">
+  <label>Text</label>
+  <textarea id="text" placeholder="Paste an artist bio, label history, scene notes…"></textarea>
+  <p class="submit"><button class="btn primary" id="ingestText">Ingest text</button></p>
+</div>
+
+<!-- WEB SOURCE -->
+<div class="pane" id="paneUrl">
+  <label>Website URL</label>
+  <input type="text" id="srcUrl" placeholder="https://… a site the assistant should consult">
+  <label>Topic / index <span class="hint" style="display:inline">— required: what the site is about / what to look for there</span></label>
+  <input type="text" id="srcTopic" placeholder="e.g. modular synthesis · label roster · techno history">
+  <label>Note <span class="hint" style="display:inline">— optional</span></label>
+  <input type="text" id="srcNote" placeholder="optional reminder for yourself">
+  <p class="submit"><button class="btn primary" id="addSource">Add web source</button></p>
+  <div class="hint" style="line-height:1.5">The assistant searches these sites LIVE when your question is not
+    covered by your collection, knowledge base or Resident Advisor. Each search is embedded and cached, so it
+    still answers if the site is unreachable later.</div>
+</div>
+
+<div class="verdict" id="verdict"></div>
+<div class="err" id="err"></div>
+
+<h2>In the knowledge base <span class="kbstat" id="kbstat"></span></h2>
+<div class="filter-row">
+  <label style="margin:0">Category</label>
+  <select id="catFilter"><option value="">All categories</option></select>
+</div>
+<div id="docs"></div>
+
+<h2>Reference websites <span class="kbstat" id="srcStat"></span></h2>
+<div id="sources"></div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+/* ── tab switching ── */
+function show(which){
+  for (const k of ['File', 'Text', 'Url']){
+    const on = which === k.toLowerCase();
+    $('tab' + k).classList.toggle('on', on);
+    $('pane' + k).classList.toggle('on', on);
+  }
+}
+$('tabFile').onclick = () => show('file');
+$('tabText').onclick = () => show('text');
+$('tabUrl').onclick  = () => show('url');
+
+/* ── verdict banner ── */
+function verdict(kind, head, reason){
+  const v = $('verdict');
+  v.className = 'verdict show ' + kind;
+  v.innerHTML = `<div>${esc(head)}</div>` +
+    (reason ? `<div class="reason">${esc(reason)}</div>` : '');
+}
+function clearMsg(){ $('err').textContent = ''; $('verdict').className = 'verdict'; }
+
+/* ── file picker ── */
+let chosen = null;
+const drop = $('drop'), fileInput = $('file');
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => setFile(fileInput.files[0]);
+['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => setFile(ev.dataTransfer.files[0]));
+function setFile(f){
+  chosen = f || null;
+  $('fileName').textContent = chosen ? `Selected: ${chosen.name}` : '';
+  $('ingestFile').disabled = KB_FULL || !chosen;
+}
+
+/* ── handle an ingest response (shared by both modes) ── */
+async function handle(resp){
+  if (resp.ok){
+    const d = await resp.json();
+    const tags = (d.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('');
+    const cat = d.category ? `<span class="chip cat">${esc(d.category)}</span>` : '';
+    verdict('ok', `Accepted — "${d.title}" → ${d.n_chunks} chunk(s) indexed.`,
+      d.reason ? `Gate: ${d.reason}` : '');
+    if (cat || tags) $('verdict').innerHTML += `<div class="chips">${cat}${tags}</div>`;
+    loadDocs();
+    return true;
+  }
+  let body; try { body = await resp.json(); } catch(_) { body = null; }
+  const det = body && body.detail;
+  if (resp.status === 422 && det && det.rejected){
+    verdict('no', 'Rejected — this does not look like music. Nothing was stored.',
+      det.reason);
+  } else if (resp.status === 409 && det && det.full){
+    // KB at capacity — nothing stored; refresh the gauge/banner.
+    verdict('no', 'Knowledge base full — nothing was stored.',
+      `${det.chunks} / ${det.cap} chunks used. Delete documents below to free space.`);
+    loadDocs();
+  } else if (resp.status === 413){
+    verdict('no', 'File too large — nothing was stored.',
+      typeof det === 'string' ? det : 'Reduce the file size and try again.');
+  } else {
+    $('err').textContent = (typeof det === 'string' ? det : null) ||
+      (body ? JSON.stringify(body) : `Error ${resp.status}`);
+  }
+  return false;
+}
+
+/* ── capacity: gauge + full banner + lock uploads when full (RAG size guard) ── */
+let KB_FULL = false;
+function applyCapacity(stats){
+  const used = stats.chunks || 0, max = stats.max_chunks || 0;
+  const pct = max ? Math.min(100, Math.round(used / max * 100)) : 0;
+  KB_FULL = !!stats.full;
+  const cls = KB_FULL ? 'full' : (pct >= 80 ? 'warn' : '');
+  $('kbstat').innerHTML =
+    `${stats.documents} doc(s) · ` +
+    `<span class="gauge">${used.toLocaleString()} / ${max.toLocaleString()} chunks` +
+    `<span class="bar"><div class="${cls}" style="width:${pct}%"></div></span></span>`;
+  if (stats.max_file_mb != null){
+    $('dropSub').textContent =
+      `.txt · .md · .pdf · .docx — up to ${stats.max_file_mb}MB each`;
+  }
+  const banner = $('capBanner');
+  if (KB_FULL){
+    banner.innerHTML = `<b>Knowledge base full</b> — ${used.toLocaleString()} / ` +
+      `${max.toLocaleString()} chunks. Delete documents below to free space before ` +
+      `adding new knowledge.`;
+    banner.classList.add('show');
+  } else {
+    banner.classList.remove('show');
+  }
+  lockUploads(KB_FULL);
+}
+function lockUploads(locked){
+  $('ingestText').disabled = locked;
+  $('ingestFile').disabled = locked || !chosen;
+  drop.style.opacity = locked ? '.45' : '';
+  drop.style.pointerEvents = locked ? 'none' : '';
+}
+
+/* ── ingest file ── */
+$('ingestFile').onclick = async () => {
+  if (!chosen) return;
+  clearMsg(); verdict('work', 'Checking with the music gate and embedding…');
+  $('ingestFile').disabled = true;
+  const fd = new FormData(); fd.append('file', chosen);
+  try {
+    const r = await fetch('/kb/file', { method:'POST', body: fd });
+    const ok = await handle(r);
+    if (ok){ setFile(null); fileInput.value = ''; }
+  } catch(e){ $('err').textContent = e.message; }
+  finally { $('ingestFile').disabled = KB_FULL || !chosen; }
+};
+
+/* ── ingest pasted text ── */
+$('ingestText').onclick = async () => {
+  clearMsg();
+  const title = $('title').value.trim(), text = $('text').value.trim();
+  if (text.length < 40){ $('err').textContent = 'Text is too short.'; return; }
+  verdict('work', 'Checking with the music gate and embedding…');
+  $('ingestText').disabled = true;
+  try {
+    const r = await fetch('/kb/text', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ title, text }) });
+    const ok = await handle(r);
+    if (ok){ $('title').value = ''; $('text').value = ''; }
+  } catch(e){ $('err').textContent = e.message; }
+  finally { $('ingestText').disabled = KB_FULL; }
+};
+
+/* ── category filter ── */
+let CUR_CAT = '';
+function renderFilter(categories){
+  const sel = $('catFilter'), prev = sel.value;
+  sel.innerHTML = '<option value="">All categories</option>';
+  for (const c of categories){
+    const o = document.createElement('option');
+    o.value = c.category; o.textContent = `${c.category} (${c.n})`;
+    sel.appendChild(o);
+  }
+  sel.value = prev;
+}
+$('catFilter').onchange = () => { CUR_CAT = $('catFilter').value; loadDocs(); };
+
+/* edit a field via PATCH, then reload */
+async function patchDoc(id, body){
+  await fetch('/kb/docs/' + id, { method:'PATCH',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  loadDocs();
+}
+
+/* ── document list ── */
+async function loadDocs(){
+  const data = await j('/kb/docs' + (CUR_CAT ? `?category=${encodeURIComponent(CUR_CAT)}` : ''));
+  applyCapacity(data.stats);
+  renderFilter(data.categories || []);
+  const wrap = $('docs');
+  if (!data.documents.length){
+    wrap.innerHTML = '<div class="drop-hint">empty — ingest your first document above</div>';
+    return;
+  }
+  wrap.innerHTML = '';
+  for (const d of data.documents){
+    const when = d.ingested_at ? d.ingested_at.slice(0, 16).replace('T', ' ') : '';
+    const tags = (d.tags || []).map(t =>
+      `<span class="chip" data-tag="${esc(t)}" title="click to remove">${esc(t)}</span>`).join('');
+    const cat = `<span class="chip cat" title="click to rename category">${esc(d.category || 'uncategorised')}</span>`;
+    const row = document.createElement('div');
+    row.className = 'doc';
+    row.innerHTML =
+      `<div style="flex:1"><div class="t">${esc(d.title)}</div>` +
+      `<div class="m">${d.n_chunks} chunk(s) · ${esc(d.source_type)} · ${when}</div>` +
+      `<div class="chips">${cat}${tags}` +
+        `<span class="chip add" title="add a tag">+ tag</span></div></div>` +
+      `<button class="del" data-id="${d.doc_id}">Delete</button>`;
+    // rename category
+    row.querySelector('.chip.cat').onclick = () => {
+      const v = prompt('Category for this document:', d.category || '');
+      if (v !== null && v.trim() !== (d.category || '')) patchDoc(d.doc_id, { category: v.trim() });
+    };
+    // remove a tag
+    row.querySelectorAll('.chip[data-tag]').forEach(ch => ch.onclick = () => {
+      const left = (d.tags || []).filter(t => t !== ch.dataset.tag);
+      patchDoc(d.doc_id, { tags: left });
+    });
+    // add a tag
+    row.querySelector('.chip.add').onclick = () => {
+      const v = prompt('New tag:');
+      if (v && v.trim()) patchDoc(d.doc_id, { tags: [...(d.tags || []), v.trim()] });
+    };
+    row.querySelector('.del').onclick = async (e) => {
+      const id = e.target.dataset.id;
+      if (!confirm('Delete this document from the knowledge base?')) return;
+      try { await fetch('/kb/docs/' + id, { method:'DELETE' }); loadDocs(); }
+      catch(err){ $('err').textContent = err.message; }
+    };
+    wrap.appendChild(row);
+  }
+}
+
+/* ── reference web sources (live search targets, separate from the KB cap) ── */
+$('addSource').onclick = async () => {
+  clearMsg();
+  const url = $('srcUrl').value.trim(), topic = $('srcTopic').value.trim(),
+        note = $('srcNote').value.trim();
+  if (!url){ $('err').textContent = 'Enter a website URL.'; return; }
+  if (!topic){ $('err').textContent = 'Topic is required — say what the site is about.'; return; }
+  $('addSource').disabled = true;
+  verdict('work', 'Registering and taking a snapshot…');
+  try {
+    const r = await fetch('/kb/source', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ url, topic, note: note || null }) });
+    if (r.ok){
+      const d = await r.json();
+      verdict('ok', `Added — "${esc(d.topic)}"`,
+        d.seeded_chunks ? `Snapshot embedded: ${d.seeded_chunks} chunk(s).`
+                        : 'Registered (no snapshot could be taken).');
+      $('srcUrl').value = ''; $('srcTopic').value = ''; $('srcNote').value = '';
+      loadSources();
+    } else {
+      let b; try { b = await r.json(); } catch(_){ b = null; }
+      const det = b && b.detail;
+      $('err').textContent = (typeof det === 'string' ? det : null) ||
+        (b ? JSON.stringify(b) : `Error ${r.status}`);
+    }
+  } catch(e){ $('err').textContent = e.message; }
+  finally { $('addSource').disabled = false; }
+};
+
+async function loadSources(){
+  let data; try { data = await j('/kb/sources'); } catch(e){ return; }
+  const wrap = $('sources'), list = data.sources || [];
+  $('srcStat').textContent = list.length ? `${list.length} site(s)` : '';
+  if (!list.length){
+    wrap.innerHTML = '<div class="drop-hint">no reference websites yet — add one above</div>';
+    return;
+  }
+  wrap.innerHTML = '';
+  for (const s of list){
+    let host = s.url; try { host = new URL(s.url).hostname.replace(/^www\./, ''); } catch(_){}
+    const row = document.createElement('div');
+    row.className = 'doc';
+    row.innerHTML =
+      `<div style="flex:1"><div class="t">${esc(s.topic)}</div>` +
+      `<div class="m"><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(host)}</a>` +
+        `${s.note ? ' · ' + esc(s.note) : ''}</div></div>` +
+      `<button class="del" data-id="${s.source_id}">Delete</button>`;
+    row.querySelector('.del').onclick = async (e) => {
+      if (!confirm('Remove this reference website?')) return;
+      try { await fetch('/kb/sources/' + e.target.dataset.id, { method:'DELETE' }); loadSources(); }
+      catch(err){ $('err').textContent = err.message; }
+    };
+    wrap.appendChild(row);
+  }
+}
+
+loadDocs().catch(e => $('err').textContent = 'API not responding: ' + e.message);
+loadSources();
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

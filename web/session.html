@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Session</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  h1 { margin-bottom: .3rem; }
+  td.method { font-family: var(--mono); font-size: .68rem; color: var(--mute);
+              text-transform: uppercase; letter-spacing: .1em; }
+  /* Per-track mix rating: tap to cycle unrated → good (green) → bad (red). */
+  td.rating { text-align: center; }
+  .rate { background: none; border: none; cursor: pointer; line-height: 1;
+          font-size: .95rem; color: var(--mute); transition: color .12s; }
+  .rate:hover { color: var(--text); }
+  .rate.good { color: #2ecc71; } .rate.bad { color: var(--red); }
+</style>
+</head>
+<body>
+<a class="back" id="back" href="/sessions">← Sessions</a>
+<h1 id="name">…</h1>
+<div class="meta" id="meta"></div>
+
+<table id="tl"><thead>
+<tr><th></th><th class="cover"></th><th>#</th><th>Time</th><th>Artist</th><th>Track</th><th>EP</th><th class="key num">KEY</th><th>Method</th><th>Mix</th></tr>
+</thead><tbody></tbody></table>
+<div class="err" id="err"></div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script src="/player.js"></script>
+<script src="/keycol.js"></script>
+<script>
+const SID = new URLSearchParams(location.search).get('id');
+
+
+async function load(){
+  const s = await j('/sessions/' + SID);
+  document.title = `The Crate — ${s.name || 'Session'}`;
+  document.getElementById('name').textContent = s.name || 'Session';
+  // Safe rename (✎ → ✓/Enter; blur/Esc cancel) — never an accidental change.
+  editNameSafe(document.getElementById('name'), s.name || 'Session', async (v) => {
+    await j('/sessions/' + SID, { method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: v }) });
+    location.reload();
+  });
+  const dur = s.ended_at ? Math.round((new Date(s.ended_at) - new Date(s.started_at)) / 60000) : null;
+  document.getElementById('meta').textContent =
+    (s.started_at || '').slice(0, 16).replace('T', ' ') +
+    (dur != null ? ` · ${dur} min` : '') + ` · ${s.tracklist.length} track(s)`;
+
+  const tb = document.querySelector('#tl tbody');
+  for (const t of s.tracklist){
+    const p = parseLabel(t.filename);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="num">${t.position}</td>` +
+      `<td class="num">${(t.played_at || '').slice(11, 16)}</td>` +
+      `<td class="ed-artist">${esc(p.artist)}</td><td class="ed-track">${esc(p.track)}</td>` +
+      `<td class="ed-ep">${esc(p.ep) || '—'}</td>` +
+      `<td class="key num">${esc(t.camelot) || '—'}</td>` +
+      `<td class="method">${esc(t.detected_by) || '—'}</td>`;
+    VinylPlayer.bind(tr, t.track_id, `${p.artist} — ${p.track}`, { cover: true });  // previewable
+    if (t.track_id){    // history rows with a since-deleted track aren't editable
+      bindEdit(tr.querySelector('.ed-artist'), t, 'artist', saveName);
+      bindEdit(tr.querySelector('.ed-track'),  t, 'track',  saveName);
+      bindEdit(tr.querySelector('.ed-ep'),     t, 'ep',     saveName);
+    }
+    tr.appendChild(ratingCell(t));
+    tb.appendChild(tr);
+  }
+}
+
+/* Tri-state mix rating per track: unrated (○) → good (green ●) → bad (red ●) → unrated.
+   Keyed by position; updates the cell in place (no reload) and PATCHes the session. */
+function ratingCell(t){
+  const td = document.createElement('td');
+  td.className = 'rating';
+  const btn = document.createElement('button');
+  let cur = t.rating || '';
+  const paint = () => { btn.className = 'rate' + (cur ? ' ' + cur : '');
+                        btn.textContent = cur ? '●' : '○'; };
+  paint();
+  btn.title = 'rate this mix: green = good, red = bad';
+  btn.onclick = async (e) => {
+    e.stopPropagation();                                   // never trigger row-play
+    const next = cur === '' ? 'good' : cur === 'good' ? 'bad' : '';
+    try {
+      await j(`/sessions/${SID}/track/${t.position}`, { method:'PATCH',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({ rating: next || null }) });
+      cur = next; paint();
+    } catch(err){ toast('Could not rate this track: ' + err.message, { type:'bad' }); }
+  };
+  td.appendChild(btn);
+  return td;
+}
+
+async function saveName(trackId, filename){
+  await j('/tracks/' + trackId, { method:'PATCH',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filename }) });
+  document.querySelector('#tl tbody').innerHTML = '';
+  await load();
+}
+
+if (!SID){ document.getElementById('err').textContent = 'Missing ?id=<session> in the URL.'; }
+else { load().catch(e => document.getElementById('err').textContent = 'Error: ' + e.message); }
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

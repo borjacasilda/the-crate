@@ -1,0 +1,44 @@
+# The Crate — local Postgres + pgvector.
+# Spin up with:  docker compose up -d
+# Tear down (keep data):  docker compose down
+# Tear down (wipe data):  docker compose down -v
+#
+# Project name is PINNED so it stays stable if the folder is renamed. Compose
+# otherwise derives it from the directory; this repo's data + container were
+# created under the project "embeddings2" (the original folder name), so we pin
+# that to keep reusing the existing volume (embeddings2_vinylid_pgdata) instead
+# of silently spinning up an empty new one.
+name: embeddings2
+services:
+  db:
+    # Image choice: pgvector/pgvector is published by the pgvector project itself
+    # (the upstream maintainer, ankane), so the extension version always tracks the
+    # library and ships pre-compiled — no build step, no "make install" in an init
+    # script. The `pg16` tag pins PostgreSQL 16. (Note: upstream does not publish an
+    # alpine variant; this debian-slim image is the actively-maintained equivalent.)
+    image: pgvector/pgvector:pg16
+    container_name: vinylid-db
+    restart: unless-stopped
+    environment:
+      # Loaded from .env at project root (see .env.example). DB name is fixed;
+      # user/password are secrets and must come from the environment.
+      POSTGRES_DB: vinylid
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      # Host:container. DB_PORT lets you remap if 5432 is already taken locally.
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      # Named volume = data survives `docker compose down` (but not `down -v`).
+      - vinylid_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready gates dependent services: they wait until the DB accepts
+      # connections, not merely until the container process has started.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d vinylid"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  vinylid_pgdata:

@@ -1,0 +1,61 @@
+# NOTE: .gitignore does not support trailing/inline comments — each pattern is on
+# its own line, with comments on separate lines above.
+
+# ── Secrets — never commit real credentials (.env.example is the template) ──
+.env
+.env.local
+
+# ── Python ──
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# ── Virtual environment ──
+.venv/
+
+# ── User data, generated artifacts & ML weights (NOT source — never publish) ──
+# The repo ships CODE only; every path below is reproduced locally (ingest your audio,
+# download the models, etc.). Committing them would be heavy and, for models/, would
+# also break the "not redistributed" stance in LEGAL.md.
+# crate/          = standardised 120 s / 16 kHz excerpts (the ingest output)
+# recordings/     = full live vinyl takes
+# samples_tracks/ = source audio you feed in (copyrighted — must never be published)
+# covers/         = Discogs cover art
+# models/         = Essentia .pb weights (CC BY-NC-SA, see LEGAL.md; downloaded at runtime)
+# .cache/         = active-crate marker + assistant profile
+crate/
+recordings/
+samples_tracks/
+covers/
+models/
+.cache/
+
+# Generated test outputs (the suites regenerate these; the test code itself is tracked).
+ab_tests/output_tests/
+
+# ── Runtime logs ──
+*.log
+logs/
+
+# ── Internal / private working notes & local tooling (kept local, not published) ──
+documents/
+proyecto_contexto.md
+DEVELOPMENT.md
+.claude/
+.rtk/
+# CLAUDE.md is Claude Code dev guidance that points at the (ignored) .claude/ context and
+# personal tooling — not useful in a public clone. Delete this line to publish it.
+CLAUDE.md
+
+# ── Editor / OS config ──
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo

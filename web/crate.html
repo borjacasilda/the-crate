@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Crate</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  h1 { margin-bottom: .3rem; }
+  .desc { font-size: .82rem; color: var(--dim); margin: .5rem 0 .2rem; }
+  tr.pending td { color: var(--mute); font-style: italic; }
+  /* BPM hideable with one click on the header (visibility keeps column width). */
+  th.bpm { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.bpm:hover { color: var(--red); }
+  body.hide-bpm td.bpm { visibility: hidden; }
+  /* On-spot rows inside the recent dropdown: already pulled — dimmed, red dot
+     on the ARTIST cell (the first cell is the play control). */
+  tr.onspot td { color: var(--mute); }
+  tr.onspot td:nth-child(2)::before { content: '● '; color: var(--red); }
+  #importStatus { font-size: .74rem; color: var(--mute); font-family: var(--mono); }
+  #importStatus .ok { color: var(--text); } #importStatus .bad { color: var(--red); }
+  /* Per-row delete: subtle ✕, revealed on row hover, distinct from the On Spot toggle. */
+  th.del-col { width: 1.6rem; }
+  td.row-del { width: 1.6rem; text-align: center; color: var(--mute); cursor: pointer;
+               opacity: 0; transition: opacity .12s, color .12s; }
+  tr:hover td.row-del { opacity: 1; }
+  td.row-del:hover { color: var(--red); }
+  /* Import-from-crate picker (inverse of Add to crate). */
+  .imp-list { max-height: 50vh; overflow-y: auto; margin: .6rem 0; border: 1px solid var(--line); }
+  .imp-row { display: flex; gap: .6rem; align-items: center; padding: .35rem .6rem;
+             font-size: .82rem; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .imp-row:last-child { border-bottom: none; }
+  .imp-row:hover { background: var(--surface-2); }
+  #impSrc { width: auto; }
+</style>
+</head>
+<body>
+<a class="back" href="/crates">← Collection</a>
+<h1 id="name">…</h1>
+<span class="badge" id="genre"></span>
+<div class="desc" id="desc"></div>
+<div class="meta" id="meta"></div>
+
+<div class="actions">
+  <div class="menu" id="mgmtMenu">
+    <button class="btn primary" id="mgmtBtn">Crate management ▾</button>
+    <div class="menu-list">
+      <button id="actRecord">Record vinyl</button>
+      <button id="actImport">Import files</button>
+      <button id="actDelete" class="danger">Delete files</button>
+      <button id="actMove">Add to crate…</button>
+      <button id="actImportCrate">Import from crate…</button>
+      <button id="actKnowledge">Feed knowledge base…</button>
+    </div>
+  </div>
+  <a class="btn" id="liveBtn" href="#">Live Mode</a>
+  <a class="btn" id="sessionsBtn" href="#">Sessions</a>
+  <a class="btn" id="discogsBtn" href="/discogs" title="Enrich metadata from Discogs: label, year, styles and cover art + confirm doubtful matches">Enrich</a>
+  <input type="file" id="filePick" multiple accept=".mp3,.wav,.flac" style="display:none">
+  <span id="importStatus"></span>
+</div>
+
+<!-- ── ON SPOT: the record-store pull pile — the records you dig mixes around. ── -->
+<div class="list-block" id="spotBlock">
+  <h2><span class="mark">▌</span>On spot</h2>
+  <table id="spotTable"><thead>
+  <tr><th class="sel"></th><th></th><th class="cover"></th><th>Artist</th><th>Track</th><th>EP</th><th>Label</th><th class="bpm num">BPM</th><th class="key num">KEY</th><th class="del-col"></th></tr>
+  </thead><tbody></tbody></table>
+  <div class="drop-hint" id="spotHint">drag the records you want to focus on here</div>
+</div>
+
+<!-- Last 10 added (recorded/imported) — shortcut to build the On spot list. -->
+<details id="recentBox">
+  <summary>Last 10 added — drag (or double-click) to put them On spot</summary>
+  <table id="recentTable"><thead>
+  <tr><th class="sel"></th><th></th><th class="cover"></th><th>Artist</th><th>Track</th><th>EP</th><th>Label</th><th class="bpm num">BPM</th><th class="key num">KEY</th><th class="del-col"></th></tr>
+  </thead><tbody></tbody></table>
+</details>
+
+<!-- ── The crate: everything else. ── -->
+<div class="list-block" id="mainBlock">
+  <h2><span class="mark">▌</span>Crate <span class="sub" id="mainCount"></span></h2>
+  <table id="mainTable"><thead>
+  <tr><th class="sel"></th><th></th><th class="cover"></th><th>Artist</th><th>Track</th><th>EP</th><th>Label</th><th class="bpm num">BPM</th><th class="key num">KEY</th><th class="del-col"></th></tr>
+  </thead><tbody></tbody></table>
+</div>
+<div class="err" id="err"></div>
+
+<!-- Bulk-selection action bar: appears in delete/move mode, sits above the player. -->
+<div id="selbar">
+  <span class="count" id="selCount">0 selected</span>
+  <select id="moveDest" style="display:none; width:auto;"></select>
+  <span class="spacer"></span>
+  <button class="btn primary" id="selAction">Delete</button>
+  <button class="btn" id="selCancel">Cancel</button>
+</div>
+
+<!-- Import-from-crate picker: choose a source crate, pick its tracks, add them HERE
+     (inverse of Add to crate). Reuses the /tracks/add-to-crate endpoint. -->
+<div class="ui-overlay" id="importOverlay">
+  <div class="ui-modal wide">
+    <h2>Import from crate</h2>
+    <p>Pick a crate, then choose tracks to add to <b id="impDest"></b>.</p>
+    <select id="impSrc"></select>
+    <div class="imp-list" id="impList"></div>
+    <div class="ui-row">
+      <button class="btn primary" id="impDo">Import selected</button>
+      <button class="btn" id="impCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script src="/player.js"></script>
+<script src="/keycol.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const CRATE_ID = new URLSearchParams(location.search).get('id');
+let IS_DEFAULT = false;   // is this the master library (Vinyl Collection)?
+
+async function loadCrate(){
+  const c = await j('/crates/' + CRATE_ID);
+  document.title = `The Crate — ${c.name}`;
+  IS_DEFAULT = !!c.is_default;                 // the master library (Vinyl Collection)
+  $('name').textContent = c.name;
+  // Crate name is safe-editable (✎ → ✓/Enter; blur/Esc cancel) — but NOT for the
+  // default library: its name is the is_default sentinel, so renaming is refused.
+  if (!c.is_default){
+    editNameSafe($('name'), c.name, async (v) => {
+      await j('/crates/' + CRATE_ID, { method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: v }) });
+      location.reload();
+    });
+  }
+  // The master library (default crate) carries no genre — hide the badge.
+  $('genre').textContent = c.genre || '';
+  $('genre').style.display = c.genre ? '' : 'none';
+  $('desc').textContent = c.description || '';
+  const bpm = (c.bpm_lo != null) ? ` · prior ${Math.round(c.bpm_lo)}–${Math.round(c.bpm_hi)} BPM` : '';
+  $('meta').textContent = `${c.n_tracks} tracks` +
+    (c.n_pending ? ` · ${c.n_pending} unanalyzed` : '') + bpm;
+  $('liveBtn').href = `/listen?crate=${CRATE_ID}`;        // Live Mode, this crate preselected.
+  $('sessionsBtn').href = `/sessions?crate=${CRATE_ID}`;  // only THIS crate's sessions.
+  // Menu label reflects the semantics: master = real delete; user crate = remove.
+  $('actDelete').textContent = IS_DEFAULT ? 'Delete files' : 'Remove from crate';
+  $('actDelete').classList.toggle('danger', IS_DEFAULT);
+}
+
+/* ── two lists: On spot (pull list) + Crate, drag & drop between them ── */
+
+
+function makeRow(t){
+  const p = parseLabel(t.filename);
+  const tr = document.createElement('tr');
+  tr.draggable = true;
+  tr.dataset.id = t.track_id;
+  if (!t.analyzed) tr.classList.add('pending');
+  tr.innerHTML = `<td class="ed-artist">${esc(p.artist)}</td><td class="ed-track">${esc(p.track)}</td>` +
+    `<td class="ed-ep">${esc(p.ep) || '—'}</td>` +
+    `<td class="ed-label">${esc(t.label) || '—'}</td>` +
+    `<td class="bpm num">${t.bpm ? t.bpm.toFixed(1) : '—'}</td>` +
+    `<td class="key num">${esc(t.camelot) || '—'}</td>`;
+  VinylPlayer.bind(tr, t.track_id, `${p.artist} — ${p.track}`, { cover: true });
+  // Inline edit: track/EP/label edit this track; artist renames the ENTITY across
+  // the whole library (global). All reload so the change shows up wherever it appears.
+  bindEdit(tr.querySelector('.ed-artist'), t, 'artist', saveTrackName,
+    async (o, n) => { const ok = await renameArtist(o, n); if (ok) await loadTracks(); return ok; });
+  bindEdit(tr.querySelector('.ed-track'),  t, 'track',  saveTrackName);
+  bindEdit(tr.querySelector('.ed-ep'),     t, 'ep',     saveTrackName);
+  bindEdit(tr.querySelector('.ed-label'),  t, 'label',  saveLabel);
+  // Bulk-selection checkbox (hidden unless selection mode is on; column always
+  // present so the layout never shifts). Reflects the shared SELECTED set.
+  const selTd = document.createElement('td');
+  selTd.className = 'sel';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.checked = SELECTED.has(t.track_id);
+  cb.addEventListener('click', e => e.stopPropagation());   // don't trigger row-play
+  cb.addEventListener('change', () => toggleSelect(t.track_id, cb.checked));
+  selTd.appendChild(cb);
+  tr.insertBefore(selTd, tr.firstChild);
+  tr.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', t.track_id);
+    tr.classList.add('dragging');             // source row dims while in flight
+  });
+  tr.addEventListener('dragend', () => tr.classList.remove('dragging'));
+  tr.addEventListener('dblclick', () => setSpot(t.track_id, !t.on_spot));
+  tr.title = t.on_spot ? 'double-click: send back to the crate'
+                       : 'drag to On spot (or double-click)';
+  // Per-row delete (✕) — works in EVERY list (On spot, recent, crate), distinct from
+  // the On Spot toggle. Master library = real delete; user crate = remove-from-crate.
+  const delTd = document.createElement('td');
+  delTd.className = 'row-del';
+  delTd.textContent = '✕';
+  delTd.title = 'remove this track';
+  delTd.addEventListener('click', e => { e.stopPropagation(); deleteOne(t); });
+  tr.appendChild(delTd);
+  return tr;
+}
+
+function fill(tableId, tracks, markSpot=false){
+  const tb = document.querySelector('#' + tableId + ' tbody');
+  tb.innerHTML = '';
+  for (const t of tracks){
+    const tr = makeRow(t);
+    if (markSpot && t.on_spot) tr.classList.add('onspot');
+    tb.appendChild(tr);
+  }
+}
+
+/* Persist an inline rename, then reload every list so the change shows up
+   wherever the track appears (On spot, recent, main). */
+async function saveTrackName(trackId, filename){
+  await j('/tracks/' + trackId, { method:'PATCH',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ filename }) });
+  await loadTracks();
+}
+
+/* Persist an inline Label edit (Discogs label field), then reload every list. */
+async function saveLabel(trackId, label){
+  await j('/tracks/' + trackId, { method:'PATCH',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ label }) });
+  await loadTracks();
+}
+
+async function loadTracks(){
+  const rows = await j('/tracks?crate=' + CRATE_ID);   // newest-first (added_at DESC)
+  const spot = rows.filter(t => t.on_spot);
+  const rest = rows.filter(t => !t.on_spot);
+  fill('spotTable', spot);
+  fill('mainTable', rest);
+  fill('recentTable', rows.slice(0, 10), true);        // the 10 most recently added
+  $('spotHint').style.display = spot.length ? 'none' : '';
+  $('mainCount').textContent = `— ${rest.length} record(s)`;
+  VinylPlayer.refresh();     // re-renders wipe the playing highlight — restore it
+}
+
+async function setSpot(trackId, value){
+  try {
+    await j('/tracks/' + trackId, { method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ on_spot: value }) });
+    await loadTracks();
+    // Red flash on the row in its NEW list — eye lands where the record did.
+    document.querySelectorAll(`tr[data-id="${trackId}"]`)
+      .forEach(tr => tr.classList.add('flash'));
+  } catch(e){ $('err').textContent = 'Could not move the track: ' + e.message; }
+}
+
+/* Per-row delete (the ✕ on any row). IS_DEFAULT is read at click time, so it is
+   correct even if the row was built before loadCrate resolved. Confirms via the
+   shared confirmDialog, then reloads. */
+async function deleteOne(t){
+  const name = parseLabel(t.filename).track || t.filename;
+  try {
+    if (IS_DEFAULT){
+      if (!await confirmDialog({ title: 'Delete track?', danger: true, confirmLabel: 'Delete',
+        body: `“${name}” will be deleted from your whole collection. This is irreversible.` })) return;
+      await post('/tracks/delete', { track_ids: [t.track_id] });
+      toast('Track deleted');
+    } else {
+      if (!await confirmDialog({ title: 'Remove track?', confirmLabel: 'Remove',
+        body: `Remove “${name}” from this crate. It stays in Vinyl Collection and any other crate.` })) return;
+      await post('/tracks/remove-from-crate', { track_ids: [t.track_id], crate: CRATE_ID });
+      toast('Removed from crate');
+    }
+    loadCrate(); loadTracks();
+  } catch(e){ toast('Could not remove track: ' + e.message, { type: 'bad' }); }
+}
+
+// Drop zones: dropping on On spot flags the track, dropping on the crate unflags it.
+function dropZone(el, value){
+  el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('over'); });
+  el.addEventListener('dragleave', () => el.classList.remove('over'));
+  el.addEventListener('drop', e => {
+    e.preventDefault(); el.classList.remove('over');
+    const id = e.dataTransfer.getData('text/plain');
+    if (id) setSpot(id, value);
+  });
+}
+dropZone($('spotBlock'), true);
+dropZone($('mainBlock'), false);
+
+/* ── Hideable BPM: click any BPM header, preference persisted.
+      Playing without BPM in sight trains the ear and the beatmatching. ── */
+function applyBpmPref(){
+  const hide = localStorage.getItem('thecrate_hide_bpm') === '1';
+  document.body.classList.toggle('hide-bpm', hide);
+  document.querySelectorAll('th.bpm').forEach(th => {
+    th.textContent = hide ? 'BPM ⊘' : 'BPM';
+    th.title = hide ? 'click to show' : 'click to hide (vinyl mode)';
+  });
+}
+document.addEventListener('click', e => {
+  if (e.target.matches('th.bpm')){
+    const hide = localStorage.getItem('thecrate_hide_bpm') !== '1';
+    localStorage.setItem('thecrate_hide_bpm', hide ? '1' : '0');
+    applyBpmPref();
+  }
+});
+applyBpmPref();
+
+/* ── Crate management dropdown: Record / Import / Delete / Move ── */
+const menu = $('mgmtMenu');
+$('mgmtBtn').onclick = e => { e.stopPropagation(); menu.classList.toggle('open'); };
+document.addEventListener('click', e => { if (!menu.contains(e.target)) menu.classList.remove('open'); });
+
+$('actRecord').onclick = () => { location.href = `/record?crate=${CRATE_ID}`; };
+$('actImport').onclick = () => { menu.classList.remove('open'); $('filePick').click(); };
+$('actDelete').onclick = () => { menu.classList.remove('open'); enterSelect('delete'); };
+$('actMove').onclick   = () => { menu.classList.remove('open'); enterSelect('add'); };
+$('actImportCrate').onclick = () => { menu.classList.remove('open'); openImport(); };
+// Feed the assistant's RAG (global knowledge base — shared across all crates).
+$('actKnowledge').onclick = () => { location.href = '/knowledge'; };
+
+/* ── Import FROM another crate INTO this one (inverse of Add to crate) ──
+   Pick a source crate, tick its tracks, add them here via /tracks/add-to-crate.
+   A track can live in several crates, so this never moves — it copies the membership. */
+const IMP_SEL = new Set();
+async function openImport(){
+  IMP_SEL.clear();
+  $('impDest').textContent = $('name').textContent || 'this crate';
+  let others;
+  try {
+    others = (await j('/crates', { headers: { 'Accept': 'application/json' } }))
+      .filter(c => c.crate_id !== CRATE_ID);
+  } catch(e){ toast('Could not load crates: ' + e.message, { type: 'bad' }); return; }
+  if (!others.length){ toast('No other crates to import from — create one first.', { type: 'bad' }); return; }
+  $('impSrc').innerHTML = others
+    .map(c => `<option value="${c.crate_id}">${esc(c.name)}</option>`).join('');
+  await loadImpList();
+  $('importOverlay').classList.add('open');
+}
+async function loadImpList(){
+  IMP_SEL.clear();
+  const src = $('impSrc').value;
+  let rows = [];
+  try { rows = await j('/tracks?crate=' + src); } catch(e){ /* show empty */ }
+  $('impList').innerHTML = rows.length
+    ? rows.map(t => { const p = parseLabel(t.filename);
+        return `<label class="imp-row"><input type="checkbox" data-id="${t.track_id}">` +
+               `<span>${esc(p.artist)} — ${esc(p.track)}</span></label>`; }).join('')
+    : '<div class="drop-hint">this crate is empty</div>';
+  $('impList').querySelectorAll('input').forEach(cb => cb.onchange = () =>
+    cb.checked ? IMP_SEL.add(cb.dataset.id) : IMP_SEL.delete(cb.dataset.id));
+}
+$('impSrc').onchange = loadImpList;
+$('impCancel').onclick = () => $('importOverlay').classList.remove('open');
+$('impDo').onclick = async () => {
+  if (!IMP_SEL.size){ $('importOverlay').classList.remove('open'); return; }
+  try {
+    const r = await post('/tracks/add-to-crate', { track_ids: [...IMP_SEL], crate: CRATE_ID });
+    toast(`${r.added} imported into this crate`);
+    $('importOverlay').classList.remove('open');
+    loadCrate(); loadTracks();
+  } catch(e){ toast('Import failed: ' + e.message, { type: 'bad' }); }
+};
+
+/* ── hardware import: the browser file picker IS the hardware door in a
+      local app (USB, mounted phone, SD, disk). ── */
+$('filePick').onchange = async () => {
+  const files = [...$('filePick').files];
+  if (!files.length) return;
+  const fd = new FormData();
+  fd.append('crate', CRATE_ID);
+  for (const f of files) fd.append('files', f);
+  $('importStatus').textContent = `uploading ${files.length} file(s)…`;
+  try {
+    const r = await j('/import', { method:'POST', body: fd });
+    pollImport(r.job_id);
+  } catch(e){
+    $('importStatus').innerHTML = `<span class="bad">error: ${e.message}</span>`;
+  }
+  $('filePick').value = '';
+};
+
+async function pollImport(id){
+  const tick = async () => {
+    const job = await j('/jobs/' + id);
+    if (job.state === 'done'){
+      const r = job.result;
+      $('importStatus').innerHTML =
+        `<span class="ok">✓ ${r.imported.length} imported</span>` +
+        (r.moved && r.moved.length ? ` · ${r.moved.length} moved to this crate` : '') +
+        (r.skipped.length ? ` · ${r.skipped.length} already here` : '') +
+        (r.failed.length ? ` · <span class="bad">${r.failed.length} fallaron</span>` : '');
+      loadCrate(); loadTracks();
+      return;
+    }
+    if (job.state === 'failed'){
+      $('importStatus').innerHTML = `<span class="bad">✗ ${job.error}</span>`;
+      return;
+    }
+    $('importStatus').textContent =
+      `importing and analyzing… ${job.detail || ''} (each track takes ~30-60s)`;
+    setTimeout(tick, 1500);
+  };
+  tick();
+}
+
+/* ── bulk selection (delete / add-to-crate) ── */
+const SELECTED = new Set();
+let SELMODE = null;                              // null | 'delete' | 'add'
+
+function toggleSelect(id, on){
+  on ? SELECTED.add(id) : SELECTED.delete(id);
+  // Keep duplicate rows (same track across lists) in sync.
+  document.querySelectorAll(`tr[data-id="${id}"] td.sel input`)
+    .forEach(cb => { cb.checked = on; });
+  $('selCount').textContent = `${SELECTED.size} selected`;
+}
+
+async function enterSelect(mode){
+  SELMODE = mode;
+  SELECTED.clear();
+  document.body.classList.add('selecting', 'selbar-open');
+  document.querySelectorAll('td.sel input').forEach(cb => { cb.checked = false; });
+  $('selCount').textContent = '0 selected';
+  // On a user crate "delete" means REMOVE-from-crate (keeps it in the master
+  // library + any other crate); only on Vinyl Collection is it a global delete.
+  const label = mode === 'add' ? 'Add' : (IS_DEFAULT ? 'Delete' : 'Remove');
+  $('selAction').textContent = label;
+  $('selAction').className = 'btn ' + (mode === 'delete' && IS_DEFAULT ? 'danger' : 'primary');
+  $('moveDest').style.display = mode === 'add' ? '' : 'none';
+  if (mode === 'add'){
+    // Add to any OTHER user crate (not this one, not the master — everything is
+    // already in the master). A track can belong to several crates at once.
+    const crates = await j('/crates', { headers: { 'Accept': 'application/json' } });
+    $('moveDest').innerHTML = crates
+      .filter(c => c.crate_id !== CRATE_ID && !c.is_default)
+      .map(c => `<option value="${c.crate_id}">${esc(c.name)}</option>`).join('')
+      || '<option value="" disabled>no other crates — create one first</option>';
+  }
+}
+
+function exitSelect(){
+  SELMODE = null; SELECTED.clear();
+  document.body.classList.remove('selecting', 'selbar-open');
+}
+$('selCancel').onclick = exitSelect;
+
+$('selAction').onclick = async () => {
+  if (!SELECTED.size){ exitSelect(); return; }
+  const ids = [...SELECTED];
+  try {
+    if (SELMODE === 'delete' && IS_DEFAULT){
+      // Vinyl Collection = master library → real global delete.
+      if (!await confirmDialog({ title: 'Delete tracks?',
+        body: `Delete ${ids.length} track(s) from your whole collection. This is irreversible.`,
+        confirmLabel: 'Delete', danger: true })) return;
+      const r = await j('/tracks/delete', { method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ track_ids: ids }) });
+      $('importStatus').innerHTML = `<span class="ok">✓ ${r.deleted} deleted</span>` +
+        (r.failed ? ` · <span class="bad">${r.failed} failed</span>` : '');
+    } else if (SELMODE === 'delete'){
+      // User crate → remove from THIS crate; keep in master + any other crate.
+      const r = await j('/tracks/remove-from-crate', { method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ track_ids: ids, crate: CRATE_ID }) });
+      $('importStatus').innerHTML = `<span class="ok">✓ ${r.removed} removed (kept in Vinyl Collection)</span>` +
+        (r.failed ? ` · <span class="bad">${r.failed} failed</span>` : '');
+    } else {
+      const dest = $('moveDest').value;
+      if (!dest){ $('err').textContent = 'No destination crate.'; return; }
+      const r = await j('/tracks/add-to-crate', { method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ track_ids: ids, crate: dest }) });
+      $('importStatus').innerHTML = `<span class="ok">✓ ${r.added} added to crate</span>`;
+    }
+    exitSelect();
+    loadCrate(); loadTracks();
+  } catch(e){ $('err').textContent = e.message; }
+};
+
+if (!CRATE_ID){ $('err').textContent = 'Missing ?id=<crate> in the URL.'; }
+else {
+  Promise.all([loadCrate(), loadTracks()])
+    .catch(e => $('err').textContent = 'Error loading the crate: ' + e.message);
+}
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

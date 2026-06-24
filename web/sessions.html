@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Crate — Sessions</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%23ff2222"/></svg>'>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  .session { display: flex; align-items: baseline; justify-content: space-between;
+             gap: 1rem; border: 1px solid var(--line); background: var(--surface);
+             border-left: 3px solid var(--red); padding: .9rem 1.2rem; margin-top: .7rem;
+             text-decoration: none; color: var(--text);
+             transition: border-color .15s, transform .15s, box-shadow .15s; }
+  .session:hover { border-color: var(--text); border-left-color: var(--red);
+                   transform: translateX(3px); }
+  .session .name { font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+                   font-size: .9rem; }
+  .session .meta { margin-top: .3rem; }
+  .session .n { font-family: var(--mono); font-size: .72rem; color: var(--dim); white-space: nowrap; }
+</style>
+</head>
+<body>
+<a class="back" id="back" href="/crates">← Collection</a>
+<h1 id="title">Sessions</h1>
+<div id="list"></div>
+<div class="err" id="err"></div>
+
+<script src="/util.js"></script>
+<script src="/ui.js"></script>
+<script>
+const CRATE = new URLSearchParams(location.search).get('crate');
+
+function fmtDate(iso){ return iso ? iso.slice(0, 16).replace('T', ' ') : '—'; }
+function duration(s){
+  if (!s.ended_at) return '';
+  const min = Math.round((new Date(s.ended_at) - new Date(s.started_at)) / 60000);
+  return min >= 60 ? ` · ${Math.floor(min/60)}h ${min%60}min` : ` · ${min} min`;
+}
+
+async function load(){
+  const list = document.getElementById('list');
+  // Scope to one crate when arriving from its page (/sessions?crate=X), and
+  // point the back-link at that crate so the per-crate loop stays tight.
+  if (CRATE){
+    document.getElementById('back').href = `/crate?id=${CRATE}`;
+    try {
+      const c = await j('/crates/' + CRATE);
+      document.getElementById('title').textContent = `Sessions · ${c.name}`;
+      document.getElementById('back').textContent = `← ${c.name}`;
+    } catch(e){ /* keep the generic title */ }
+  }
+  const url = '/sessions' + (CRATE ? `?crate=${CRATE}` : '');
+  const sessions = await j(url, { headers: { 'Accept': 'application/json' } });
+  if (!sessions.length){
+    list.innerHTML = '<div class="drop-hint">no saved sessions yet' +
+      (CRATE ? ' with this crate' : '') + '</div>';
+    return;
+  }
+  for (const s of sessions){
+    const a = document.createElement('a');
+    a.className = 'session';
+    a.href = `/session?id=${s.session_id}`;
+    a.innerHTML =
+      `<div><div class="name">${esc(s.name)}</div>` +
+      `<div class="meta">${fmtDate(s.started_at)}${duration(s)}` +
+      (s.crate_name && !CRATE ? ` · ${esc(s.crate_name)}` : '') + `</div></div>` +
+      `<div class="n">${s.n_tracks} track(s)</div>`;
+    list.appendChild(a);
+  }
+}
+
+load().catch(e => document.getElementById('err').textContent =
+  'Could not load sessions: ' + e.message);
+</script>
+<script src="/chat.js"></script>
+</body>
+</html>

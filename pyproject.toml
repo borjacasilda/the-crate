@@ -1,0 +1,24 @@
+[project]
+name = "embeddings2"
+version = "0.1.0"
+description = "The Crate — local audio-analysis and DJ-recommendation engine for electronic music."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "essentia==2.1b6.dev1389",
+    "essentia-tensorflow==2.1b6.dev1389",
+    "fastapi>=0.136.3",
+    "librosa>=0.11.0",
+    "mcp>=1.27.2",
+    "numpy>=2.4.6",
+    "pydantic-ai-slim[openai]>=0.0.40",
+    "psycopg2-binary>=2.9.10",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.32",
+    "sounddevice>=0.5.5",
+    "soundfile>=0.13.1",
+    "uvicorn>=0.49.0",
+]

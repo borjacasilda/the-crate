@@ -1,0 +1,18 @@
+# Ground-truth key set for ab_tests/benchmark_key.py
+# ---------------------------------------------------------------------------
+# Fill ONE row per track with the key you TRUST (verified by ear or from the
+# producer/label — NOT Beatport, which is itself noisy). 20–30 tracks is enough
+# to compare profiles meaningfully.
+#
+# Columns:  path,true_key
+#   path      absolute or repo-relative path to a .wav/.mp3/.flac
+#   true_key  either Camelot ("9A", "8B") OR "<note> <mode>" e.g. "E minor",
+#             "Em", "F#m", "C major", "Ab maj". Enharmonics (Db/C#) are fine.
+#
+# Lines starting with '#' and blank lines are ignored. The first non-comment
+# row may be the literal header "path,true_key" (also ignored).
+#
+# The mandatory regression case from the brief (uncomment + fix the path):
+# /Users/5_prcntr/Documents/master IA/embeddings2/crate/<rene-wise-id>.wav,E minor
+# ---------------------------------------------------------------------------
+path,true_key

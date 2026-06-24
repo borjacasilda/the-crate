@@ -1,0 +1,31 @@
+name: CI
+
+# Fast, dependency-light checks that run reliably on every push/PR:
+#   - ruff: catch real errors (syntax, undefined names) without style noise
+#   - compileall: every module byte-compiles
+# The full test suites (ab_tests/) need PostgreSQL + Essentia models + Ollama, so
+# they are run locally / in a dedicated environment, not here. See CONTRIBUTING.md.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint (errors only — syntax & undefined names)
+        run: ruff check --select E9,F63,F7,F82 .
+      - name: Byte-compile all modules
+        # Exclude .venv: a local virtualenv may ship third-party packages with legacy
+        # Python-2 files that don't byte-compile (e.g. Essentia's extractor scripts). CI's
+        # fresh checkout has no .venv, so this is a no-op there but keeps local runs clean.
+        run: python -m compileall -q -x '\.venv' .
