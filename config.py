@@ -57,6 +57,17 @@ COVERS_DIR = Path(os.environ.get("THECRATE_COVERS_DIR",
 KB_MAX_CHUNKS = int(os.environ.get("THECRATE_KB_MAX_CHUNKS", "4000"))
 KB_MAX_FILE_MB = float(os.environ.get("THECRATE_KB_MAX_FILE_MB", "8"))
 
+# Hardware-import door (POST /import) guards. Audio files are large, so the per-file
+# cap is generous (a long WAV rip can be ~100 MB) but bounded so one upload can't OOM
+# the box; the count cap bounds a runaway batch. Both env-overridable.
+IMPORT_MAX_FILE_MB = float(os.environ.get("THECRATE_IMPORT_MAX_FILE_MB", "200"))
+IMPORT_MAX_FILES = int(os.environ.get("THECRATE_IMPORT_MAX_FILES", "200"))
+
+# Cap on the in-memory API job registry (api.JOBS): each finished recording/import is a
+# tiny status dict the browser polls. Past this many, the oldest FINISHED jobs are
+# evicted so a long-lived server can't leak memory.
+JOBS_MAX = int(os.environ.get("THECRATE_JOBS_MAX", "200"))
+
 # Live "scene" lookup for the assistant (events, artists, releases). Resident
 # Advisor has no official API, so we use RA's own GraphQL endpoint as the primary
 # source; if its schema changes and a query fails we fall back to a plain web

@@ -34,7 +34,7 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -125,6 +125,32 @@ _CURRENT_TAKE: dict = {}
 MP3_SUPPORTED = False
 
 EXPORT_FORMATS = ("flac", "wav", "mp3")
+
+
+def _crate_file(row: dict) -> Path:
+    """Resolve a track's excerpt on disk by basename under CRATE_DIR (M8).
+
+    crate_path is stored ABSOLUTE, so moving the project folder would 404 every
+    audio/waveform read that trusts it. CRATE_DIR is location-independent (config)
+    and excerpt basenames are unique, so re-root by basename to survive a move.
+    """
+    return config.CRATE_DIR / Path(row["crate_path"]).name
+
+
+def _register_job(job_id: str, payload: dict) -> None:
+    """Insert a job and evict the oldest FINISHED ones so JOBS can't grow forever (M4).
+
+    Active jobs (queued / running) are never evicted; only done/failed entries past
+    config.JOBS_MAX are dropped, oldest first (dict preserves insertion order).
+    """
+    with _JOBS_LOCK:
+        JOBS[job_id] = payload
+        if len(JOBS) > config.JOBS_MAX:
+            for jid in list(JOBS):
+                if len(JOBS) <= config.JOBS_MAX:
+                    break
+                if jid != job_id and JOBS[jid].get("state") in ("done", "failed"):
+                    del JOBS[jid]
 
 
 # ════════════════════════════════════════════════════════════
@@ -553,10 +579,9 @@ def stop_recording():
     _CURRENT_TAKE.clear()
 
     job_id = uuid.uuid4().hex[:12]
-    with _JOBS_LOCK:
-        JOBS[job_id] = {"state": "queued", "result": None, "error": None,
-                        "recordings": [], "label": f"{meta['artist']} - {meta['title']}",
-                        "take_seconds": round(len(audio) / sr, 1)}
+    _register_job(job_id, {"state": "queued", "result": None, "error": None,
+                           "recordings": [], "label": f"{meta['artist']} - {meta['title']}",
+                           "take_seconds": round(len(audio) / sr, 1)})
     _EXECUTOR.submit(_process_take, job_id, audio, sr, meta)
     return {"job_id": job_id, "take_seconds": JOBS[job_id]["take_seconds"]}
 
@@ -641,11 +666,15 @@ async def import_files(crate_id: str = Form(alias="crate"),
     mounted phones, SD cards all appear as volumes. Uploads are staged to a temp
     dir, then a single job ingests+analyses them sequentially (1-worker rule).
     """
+    import shutil
     import tempfile
     bad = [f.filename for f in files
            if Path(f.filename or "").suffix.lower() not in AUDIO_EXTS]
     if bad:
         raise HTTPException(422, f"unsupported files (need .mp3/.wav/.flac): {bad}")
+    if len(files) > config.IMPORT_MAX_FILES:
+        raise HTTPException(413, f"too many files ({len(files)}); the limit is "
+                                 f"{config.IMPORT_MAX_FILES} per import.")
     try:
         resolved = database.resolve_crate_id(crate_id)
     except database.DBUnavailableError as e:
@@ -654,19 +683,34 @@ async def import_files(crate_id: str = Form(alias="crate"),
         raise HTTPException(404, f"no such crate: {crate_id}")
 
     tmp_dir = tempfile.mkdtemp(prefix="thecrate-import-")
+    max_bytes = int(config.IMPORT_MAX_FILE_MB * 1024 * 1024)
     paths, names = [], []
     for f in files:
         original = Path(f.filename).name          # Strip any client path part.
         dest = Path(tmp_dir) / _sanitize_filename(original)
-        dest.write_bytes(await f.read())
+        # Stream to disk in 1 MB chunks instead of f.read() the whole file into RAM
+        # (M5): a big WAV rip would otherwise be fully buffered. Enforce the per-file
+        # cap as we go so an oversized upload is rejected (413) without buffering it.
+        written = 0
+        try:
+            with dest.open("wb") as out:
+                while chunk := await f.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise HTTPException(
+                            413, f"{original} exceeds the "
+                                 f"{config.IMPORT_MAX_FILE_MB:g} MB per-file import limit.")
+                    out.write(chunk)
+        except HTTPException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
         paths.append(str(dest))
         names.append(original)
 
     job_id = uuid.uuid4().hex[:12]
-    with _JOBS_LOCK:
-        JOBS[job_id] = {"state": "queued", "detail": f"0/{len(paths)}",
-                        "result": None, "error": None,
-                        "label": f"import × {len(paths)}"}
+    _register_job(job_id, {"state": "queued", "detail": f"0/{len(paths)}",
+                           "result": None, "error": None,
+                           "label": f"import × {len(paths)}"})
     _EXECUTOR.submit(_process_import, job_id, paths, names, str(resolved), tmp_dir)
     return {"job_id": job_id, "files": len(paths)}
 
@@ -690,6 +734,7 @@ LIVE_INTERVAL_SECONDS = 4.0     # Recognition cadence.
 LIVE_WINDOW_SECONDS = 12.0      # Tail slice fed to the chain.
 LIVE_MIN_AUDIO_SECONDS = 8.0    # Below this the hash count can't clear MIN_VOTES.
 LIVE_GRACE_MISSES = 2           # Lock survives this many missed cycles.
+LIVE_EMBED_TIMEOUT = 8.0        # Max wait (s) for the EffNet embed before skipping a pass (M2).
 
 LIVE = {
     "running": False, "status": "idle",      # idle | searching | locked
@@ -860,6 +905,32 @@ def _apply_recognition(res) -> None:
             LIVE["status"] = "searching"
 
 
+def _make_live_embedder(audio16):
+    """Lazy, time-bounded, single-shot EffNet embedder for one recognition pass.
+
+    TF stays serialised through the shared 1-worker executor, but the wait is capped
+    at LIVE_EMBED_TIMEOUT so a busy import queue can't stall live recognition (M2):
+    on timeout we give up THIS pass (return None) and the chain degrades to
+    fingerprint / recommend-only. Memoised so the two chain stages that ask for the
+    embedding don't submit the work twice.
+    """
+    cache = {}
+
+    def embed():
+        if "v" in cache:
+            return cache["v"]
+        fut = _EXECUTOR.submit(analyze.embed_effnet, audio16)
+        try:
+            cache["v"] = fut.result(timeout=LIVE_EMBED_TIMEOUT)
+        except FuturesTimeout:
+            fut.cancel()                 # no-op if already running; frees a queued slot
+            cache["v"] = None
+            logger.debug("live embed skipped this pass: executor busy (>%.0fs)",
+                         LIVE_EMBED_TIMEOUT)
+        return cache["v"]
+    return embed
+
+
 def _live_worker():
     """Recognition loop: tail → 16 kHz → chain → state machine, every interval."""
     chain = listener.RecogniserChain.default()
@@ -871,9 +942,10 @@ def _live_worker():
             if tail is not None and sr and len(tail) >= LIVE_MIN_AUDIO_SECONDS * sr:
                 window = tail[-int(LIVE_WINDOW_SECONDS * sr):]
                 audio16 = _to_16k(window, sr)
-                # Lazy embedding: TF only runs if fingerprint misses, and always
-                # serialised through the single-worker executor.
-                embed = lambda: _EXECUTOR.submit(analyze.embed_effnet, audio16).result()
+                # Lazy embedding: TF only runs if fingerprint misses, serialised
+                # through the single-worker executor and time-bounded so a busy
+                # import queue can't stall live recognition (M2).
+                embed = _make_live_embedder(audio16)
                 res = chain.recognise(embed, audio16, config.ML_SAMPLE_RATE)
                 _apply_recognition(res)
         except Exception as e:
@@ -1330,7 +1402,7 @@ def track_audio(track_id: str):
         row = None
     if row is None:
         raise HTTPException(404, "no such track")
-    p = Path(row["crate_path"])
+    p = _crate_file(row)
     if not p.exists():
         raise HTTPException(404, "audio file missing from crate/")
     return FileResponse(p, media_type="audio/wav")
@@ -1363,7 +1435,7 @@ def track_waveform(track_id: str, bins: int = WAVEFORM_BINS):
         row = None
     if row is None:
         raise HTTPException(404, "no such track")
-    p = Path(row["crate_path"])
+    p = _crate_file(row)
     if not p.exists():
         raise HTTPException(404, "audio file missing from crate/")
     import soundfile as sf
@@ -1482,7 +1554,7 @@ def delete_tracks(body: TrackBatch):
             if row is None:
                 failed.append(tid); continue
             database.delete_track(tid)        # CASCADE removes the embedding rows.
-            p = Path(row["crate_path"])
+            p = _crate_file(row)
             if p.exists():
                 p.unlink()
             deleted.append(tid)
