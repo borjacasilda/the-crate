@@ -17,12 +17,12 @@ services:
     # script. The `pg16` tag pins PostgreSQL 16. (Note: upstream does not publish an
     # alpine variant; this debian-slim image is the actively-maintained equivalent.)
     image: pgvector/pgvector:pg16
-    container_name: vinylid-db
+    container_name: the_crate-db
     restart: unless-stopped
     environment:
       # Loaded from .env at project root (see .env.example). DB name is fixed;
       # user/password are secrets and must come from the environment.
-      POSTGRES_DB: vinylid
+      POSTGRES_DB: the_crate
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
@@ -34,7 +34,7 @@ services:
     healthcheck:
       # pg_isready gates dependent services: they wait until the DB accepts
       # connections, not merely until the container process has started.
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d vinylid"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d the_crate"]
       interval: 5s
       timeout: 5s
       retries: 5

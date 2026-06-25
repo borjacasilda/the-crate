@@ -8,7 +8,6 @@ AUDIO embeddings (the strongest signal); metadata only filters/annotates.
 These are plain functions (DB-only, no LLM) so they unit-test on their own; the
 agent registers them in agent.py.
 """
-from pathlib import Path
 
 import analyze
 import database

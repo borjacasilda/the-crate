@@ -1,5 +1,5 @@
 """
-test_analysis.py — VinylID pipeline validation
+test_analysis.py — The Crate pipeline validation
 ===============================================
 Two focused, self-contained tests that verify the two most important operations
 in the analysis pipeline and produce human-readable outputs.
@@ -85,19 +85,19 @@ REQUIRED_L1_FIELDS = (
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _setup_test_logging() -> logging.Logger:
-    """Configure and return the 'vinylid.tests' logger.
+    """Configure and return the 'the_crate.tests' logger.
 
     Attaches a single append-mode FileHandler to LOG_PATH.  Idempotent:
     calling this function multiple times (e.g. when tests are imported
     individually) never stacks duplicate handlers.
 
     Returns:
-        The configured 'vinylid.tests' Logger instance.
+        The configured 'the_crate.tests' Logger instance.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)   # ensure output dir exists early
     AB_TESTS_DIR.mkdir(parents=True, exist_ok=True) # ensure log dir exists
 
-    logger = logging.getLogger("vinylid.tests")
+    logger = logging.getLogger("the_crate.tests")
     if logger.handlers:
         return logger  # already configured — skip re-attachment
 
@@ -130,7 +130,7 @@ def _make_adapter(logger: logging.Logger, test_name: str) -> logging.LoggerAdapt
     argument to every log call.
 
     Args:
-        logger:    The base 'vinylid.tests' logger.
+        logger:    The base 'the_crate.tests' logger.
         test_name: Short uppercase label, e.g. 'TEST_ANALYZE_TRACK'.
 
     Returns:
@@ -210,7 +210,7 @@ def _get_features() -> "analyze.TrackFeatures | None":
         # it if the test logger has been initialised (may not be on very first
         # call before _setup_test_logging() runs).
         print(f"\n  ✗  extract_features() raised an exception:\n{tb}", flush=True)
-        _base_logger = logging.getLogger("vinylid.tests")
+        _base_logger = logging.getLogger("the_crate.tests")
         if _base_logger.handlers:
             # Adapter needs test_name in extra dict for the formatter.
             _make_adapter(_base_logger, "_GET_FEATURES").error(
@@ -443,7 +443,6 @@ def test_analyze_track() -> bool:
     print(f" Output:  {display_path}  ({size_bytes:,} bytes)")
     print(f" Elapsed: {elapsed:.1f} s")
 
-    passed = n_assertions - len(failures)
     if failures:
         for msg in failures:
             print(f"   ✗ {msg}")
@@ -686,7 +685,6 @@ def test_effnet_embedding() -> bool:
         model_version=model_version if db_used else "discogs-effnet-bs64-1",
     )
 
-    passed = n_assertions - len(failures) - len(skipped)
     if failures:
         log.warning("TEST RESULT: FAIL — %d/%d assertions failed, %d skipped",
                     len(failures), n_assertions, len(skipped))
@@ -943,7 +941,6 @@ def test_bpm_compat() -> bool:
 
 def test_mix_score() -> bool:
     """The two-stage scoring guarantees: immutable base, bounded modifiers, fallbacks."""
-    import numpy as np
 
     def body(check):
         t1 = _synthetic_track(effnet_embedding=[1.0, 0.0, 0.0])

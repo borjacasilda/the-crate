@@ -57,8 +57,8 @@ load_dotenv()  # Pull DB credentials from .env into os.environ. Never hardcode.
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "127.0.0.1"),
     "port": os.getenv("DB_PORT", "5432"),
-    "dbname": os.getenv("POSTGRES_DB", "vinylid"),
-    "user": os.getenv("POSTGRES_USER", "vinylid"),
+    "dbname": os.getenv("POSTGRES_DB", "the_crate"),
+    "user": os.getenv("POSTGRES_USER", "the_crate"),
     "password": os.getenv("POSTGRES_PASSWORD", ""),
 }
 

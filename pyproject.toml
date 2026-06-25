@@ -22,3 +22,8 @@ dependencies = [
     "soundfile>=0.13.1",
     "uvicorn>=0.49.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.19",
+]

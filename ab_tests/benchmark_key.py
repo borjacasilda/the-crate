@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import essentia.standard as es  # noqa: E402
 
-import analyze  # noqa: E402
 from analyze import (to_camelot, key_relationship_label, _estimate_tuning_frequency,  # noqa: E402
                      _key_extract_one, _detect_key_robust, _isolate_tonal_band)
 from config import SAMPLE_RATE  # noqa: E402

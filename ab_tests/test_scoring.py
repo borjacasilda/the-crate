@@ -1,5 +1,5 @@
 """
-test_scoring.py — VinylID scoring-engine regression tests
+test_scoring.py — The Crate scoring-engine regression tests
 =========================================================
 Three focused, DB-free tests over the pure scoring layer in analyze.py,
 covering the invariants checked in the 2026-06 spec review:
@@ -216,7 +216,7 @@ def test_topk_safeguard():
 
 
 if __name__ == "__main__":
-    print("\nVinylID scoring-engine tests\n" + "─" * 40)
+    print("\nThe Crate scoring-engine tests\n" + "─" * 40)
     test_harmonic_monotone()
     test_harmonic_confidence()
     test_density_floor()

@@ -1,5 +1,5 @@
 """
-test_api.py — VinylID API + session-layer regression tests
+test_api.py — The Crate API + session-layer regression tests
 ==========================================================
 End-to-end checks over the HTTP surface and the data-management layer built
 on top of it: track listing & stage-2 fields, audio/waveform serving, affinity,
@@ -193,7 +193,7 @@ def test_sessions_and_embeddings():
 
 
 if __name__ == "__main__":
-    print("\nVinylID API + session tests\n" + "─" * 40)
+    print("\nThe Crate API + session tests\n" + "─" * 40)
     if not _api_up():
         print("  ⚠ API/DB not reachable at " + BASE + " — start the server first.")
         print("    uv run uvicorn api:app --host 127.0.0.1 --port 8000")

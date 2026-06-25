@@ -62,6 +62,10 @@ KB_MAX_FILE_MB = float(os.environ.get("THECRATE_KB_MAX_FILE_MB", "8"))
 # the box; the count cap bounds a runaway batch. Both env-overridable.
 IMPORT_MAX_FILE_MB = float(os.environ.get("THECRATE_IMPORT_MAX_FILE_MB", "200"))
 IMPORT_MAX_FILES = int(os.environ.get("THECRATE_IMPORT_MAX_FILES", "200"))
+# Aggregate cap across a single upload (per-file × count alone could stage ~40 GB
+# in the temp dir before failing). Deliberately generous — well above any realistic
+# crate import — so it only catches a pathological/runaway batch, never normal use.
+IMPORT_MAX_TOTAL_MB = float(os.environ.get("THECRATE_IMPORT_MAX_TOTAL_MB", "8192"))
 
 # Cap on the in-memory API job registry (api.JOBS): each finished recording/import is a
 # tiny status dict the browser polls. Past this many, the oldest FINISHED jobs are

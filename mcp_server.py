@@ -61,8 +61,14 @@ Private DB/cache helpers reused by tools (INTERNAL)
 
 Library reads (recommend/search/overview/list) DO go through analyze._load_library,
 which reads the analysed crate from PostgreSQL — that is the collection the agent
-reasons over. Only the SESSION tools are forbidden from touching database.py:
-they are ephemeral, in-process memory for a single agent conversation.
+reasons over. Every such tool takes an optional `crate` argument (name or id; see
+_crate_scope): omit it for the server's active crate (the single-crate default),
+or pass a crate name to scope the read to THAT crate — the multi-agent boundary, so
+a second agent reasons over its own library in the shared DB, never another's. The
+pure per-track tools (analyze_*, compare_*, key, mix points, vinyl-offset) take no
+crate: they analyse the file handed to them and work for audio in no crate at all.
+Only the SESSION tools are forbidden from touching database.py: they are ephemeral,
+in-process memory for a single agent conversation.
 
 
 ## RETURN-SHAPE CONTRACT (applies to every tool)
@@ -162,6 +168,48 @@ def _require_db():
 def _now() -> str:
     """UTC ISO-8601 timestamp for session logs."""
     return datetime.now(timezone.utc).isoformat()
+
+
+# Shared `crate` parameter description for every library-scoped tool, so the
+# contract reads identically across them.
+_CRATE_DESC = (
+    "Crate to scope this query to, by name or id. Omit to use the server's active "
+    "crate (the single-crate default). Pass your OWN crate's name to reason over "
+    "your collection instead of the server's — each crate is an isolated library."
+)
+
+
+def _crate_scope(crate: "str | None"):
+    """Resolve the MCP `crate` argument once, for the library-scoped tools.
+
+    Returns ``(selector, crate_id, error)``:
+      * ``selector`` — value to hand ``analyze._load_library`` / ``_load_candidates``:
+        ``"__active__"`` when the agent omits ``crate`` (today's behaviour),
+        otherwise the crate name/id to scope to.
+      * ``crate_id`` — concrete id for the DB-direct reads
+        (``find_similar_effnet``, ``list_tracks``); the active crate's id when
+        ``crate`` is omitted.
+      * ``error`` — an ``_error()`` envelope when the named crate does not exist
+        (a typo is rejected loudly rather than silently scoping to the wrong — or
+        to every — collection), else ``None``.
+
+    Why this is the multi-user/multi-agent boundary: every library read is scoped
+    to ONE crate. Omitting ``crate`` keeps the server's active crate, which in the
+    single-crate world is the master library (``_effective_crate_filter`` maps it
+    to "all tracks") — so existing callers are unchanged. Passing a crate name
+    lets a second agent reason over its OWN crate in the shared database, never
+    another user's. The pure per-track tools (analyze_*, compare_*, key, mix
+    points, vinyl-offset) take NO crate: they operate on the file handed to them
+    and work for audio that lives in no crate at all.
+
+    Assumes the DB is available — callers gate on ``_require_db()`` first.
+    """
+    try:
+        if not crate:
+            return "__active__", database.active_crate_id(), None
+        return crate, database.resolve_crate_id(crate), None
+    except KeyError as e:
+        return None, None, _error(str(e))
 
 
 # Mood/characterisation fields, in display order, that _feature_dict surfaces when present.
@@ -595,14 +643,17 @@ async def get_key_analysis(
 # ════════════════════════════════════════════════════════════
 #  CATEGORY 2 — SIMILARITY & RECOMMENDATION
 # ════════════════════════════════════════════════════════════
-def _recommend_impl(track_id, mode, n, energy, temperature, exclude_ids) -> dict:
+def _recommend_impl(track_id, mode, n, energy, temperature, exclude_ids, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
+    selector, _crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
     abs_path, current = _track_features(track_id)
     if current is None:
         return _error(f"No audio file at '{track_id}'.")
-    library = analyze._load_library(exclude_path=track_id)
+    library = analyze._load_library(exclude_path=track_id, crate=selector)
     excluded = {str(Path(t).resolve()) for t in (exclude_ids or [])}
     cand = [(p, f) for p, f in library if str(Path(p).resolve()) not in excluded]
     if not cand:
@@ -613,6 +664,7 @@ def _recommend_impl(track_id, mode, n, energy, temperature, exclude_ids) -> dict
     picks = analyze.sample_by_score(scored, n, temperature)
     return {
         "now_playing": _feature_dict(current, abs_path),
+        "crate": crate or "active",
         "mode": mode, "energy_direction": energy, "temperature": temperature,
         "count": len(picks),
         "recommendations": [_pick_dict(current, p, f, s) for p, f, s in picks],
@@ -627,6 +679,7 @@ async def get_recommendations(
     energy: Annotated[str, Field(description="Desired energy direction for the next track: 'up', 'stable' (default), or 'down'.")] = "stable",
     temperature: Annotated[float, Field(description="0.0 = the single best picks (deterministic); higher (e.g. 0.7) samples for more adventurous variety.")] = 0.0,
     exclude: Annotated[list[str], Field(description="track_ids to exclude (e.g. already played this set).")] = [],
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Rank the best next tracks to mix into the given track, from the indexed library.
 
@@ -634,9 +687,10 @@ async def get_recommendations(
     modifiers (bpm, key, energy direction, transition window, mood, emotional, density).
     Use after analyze_track to answer 'what should I play next?'. Each pick carries its
     score breakdown, BPM delta, key relationship, energy direction and a one-line mix tip.
-    Requires the library database."""
+    Candidates come from `crate` (default: the server's active crate). Requires the
+    library database."""
     try:
-        return await _run(_recommend_impl, track_id, mode, n, energy, temperature, exclude)
+        return await _run(_recommend_impl, track_id, mode, n, energy, temperature, exclude, crate)
     except Exception as e:
         return _error(f"Recommendation failed: {e}")
 
@@ -742,17 +796,20 @@ async def detect_vinyl_speed_offset(
         return _error(f"Vinyl-speed comparison failed: {e}")
 
 
-def _find_similar_impl(track_id, n) -> dict:
+def _find_similar_impl(track_id, n, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
+    _selector, crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
     abs_path, f = _track_features(track_id)
     if f is None:
         return _error(f"No audio file at '{track_id}'.")
     if not f.effnet_embedding:
         return _error("This track has no EffNet embedding (pipeline level < 2). Install "
                       "essentia-tensorflow and run `python analyze.py download`, then re-analyze.")
-    rows = database.find_similar_effnet(f.effnet_embedding, n=n + 1)
+    rows = database.find_similar_effnet(f.effnet_embedding, n=n + 1, crate_id=crate_id)
     similar = []
     for r in rows:
         rp = str(Path(r["crate_path"]).resolve())
@@ -778,23 +835,27 @@ def _find_similar_impl(track_id, n) -> dict:
 async def find_similar(
     track_id: Annotated[str, Field(description="track_id whose sonic neighbours you want.")],
     n: Annotated[int, Field(description="Number of nearest neighbours to return.")] = 5,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Semantic search: find the library tracks that sound most like this one (EffNet vector).
 
     This is similarity in 'musical world' space — atmosphere, production, scene — NOT tempo
-    or key. Use for 'find me more like this'. Requires the library database and a track
-    analysed at pipeline level ≥ 2."""
+    or key. Use for 'find me more like this'. Searches `crate` (default: the server's active
+    crate). Requires the library database and a track analysed at pipeline level ≥ 2."""
     try:
-        return await _run(_find_similar_impl, track_id, n)
+        return await _run(_find_similar_impl, track_id, n, crate)
     except Exception as e:
         return _error(f"Similarity search failed: {e}")
 
 
-def _search_impl(bpm_min, bpm_max, camelot, key, scale, min_level, limit) -> dict:
+def _search_impl(bpm_min, bpm_max, camelot, key, scale, min_level, limit, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
-    lib = analyze._load_library()
+    selector, _crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
+    lib = analyze._load_library(crate=selector)
     res = []
     for p, f in lib:
         if bpm_min is not None and f.bpm < bpm_min:
@@ -827,21 +888,26 @@ async def search_tracks(
     scale: Annotated[Optional[str], Field(description="'major' or 'minor'.")] = None,
     min_pipeline_level: Annotated[Optional[int], Field(description="Only tracks analysed at this ML level or higher (1–5).")] = None,
     limit: Annotated[int, Field(description="Max tracks to return.")] = 50,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Filter the indexed library by hard criteria (BPM range, key/Camelot, min ML level).
 
     Use for precise lookups like 'tracks in A minor between 128 and 132 BPM'. All filters
-    are optional and ANDed. Requires the library database."""
+    are optional and ANDed; the search is scoped to `crate` (default: the server's active
+    crate). Requires the library database."""
     try:
-        return await _run(_search_impl, bpm_min, bpm_max, camelot, key, scale, min_pipeline_level, limit)
+        return await _run(_search_impl, bpm_min, bpm_max, camelot, key, scale, min_pipeline_level, limit, crate)
     except Exception as e:
         return _error(f"Search failed: {e}")
 
 
-def _harmonic_matches_impl(track_id, bpm_tolerance, include_relative, limit) -> dict:
+def _harmonic_matches_impl(track_id, bpm_tolerance, include_relative, limit, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
+    selector, _crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
     abs_path, current = _track_features(track_id)
     if current is None:
         return _error(f"No audio file at '{track_id}'.")
@@ -853,7 +919,7 @@ def _harmonic_matches_impl(track_id, bpm_tolerance, include_relative, limit) -> 
     if include_relative:
         compatible.add(neighbors["relative"])
     matches = []
-    for p, f in analyze._load_library(exclude_path=track_id):
+    for p, f in analyze._load_library(exclude_path=track_id, crate=selector):
         if f.camelot not in compatible:
             continue
         bpm_d = analyze.bpm_delta(current.bpm, f.bpm)
@@ -884,16 +950,17 @@ async def find_harmonic_matches(
     bpm_tolerance: Annotated[float, Field(description="Max |BPM difference| to allow (beatmatchable range).")] = 6.0,
     include_relative: Annotated[bool, Field(description="Also include the relative major/minor (a mood shift), not just same/adjacent keys.")] = True,
     limit: Annotated[int, Field(description="Max matches to return.")] = 25,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Find library tracks that mix HARMONICALLY with this one (Camelot wheel + tempo).
 
     The classic harmonic-mixing query: tracks whose key is the same, one step adjacent (a
     fifth), or the relative major/minor, AND within a beatmatchable BPM window — ranked by
     harmonic closeness then tempo proximity. Pure key+tempo, so it works even for level-1
-    tracks; complementary to get_recommendations (EffNet 'sounds-like'). Requires the library
-    database."""
+    tracks; complementary to get_recommendations (EffNet 'sounds-like'). Matches come from
+    `crate` (default: the server's active crate). Requires the library database."""
     try:
-        return await _run(_harmonic_matches_impl, track_id, bpm_tolerance, include_relative, limit)
+        return await _run(_harmonic_matches_impl, track_id, bpm_tolerance, include_relative, limit, crate)
     except Exception as e:
         return _error(f"Harmonic match search failed: {e}")
 
@@ -939,14 +1006,17 @@ async def get_mix_points(
         return _error(f"Mix-point detection failed: {e}")
 
 
-def _setlist_impl(seed, length, mode, energy, temperature) -> dict:
+def _setlist_impl(seed, length, mode, energy, temperature, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
+    selector, _crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
     abs_seed, current = _track_features(seed)
     if current is None:
         return _error(f"No audio file at '{seed}'.")
-    library = analyze._load_library(exclude_path=seed)
+    library = analyze._load_library(exclude_path=seed, crate=selector)
     if not library:
         return _error("The library has no other analysed tracks to build a set from.")
     strengths = _resolve_strengths(mode, energy)
@@ -996,15 +1066,16 @@ async def build_setlist(
     mode: Annotated[str, Field(description="Scoring preset: 'safe' | 'balanced' | 'creative'.")] = "balanced",
     energy: Annotated[str, Field(description="Energy direction to favour at each step: 'up' (default for a building set), 'stable', or 'down'.")] = "up",
     temperature: Annotated[float, Field(description="0.0 = deterministic best chain; higher samples for a different (still strong) set each run.")] = 0.0,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Build a setlist by greedily chaining the best next track from a seed.
 
     Returns the ordered tracklist plus a transition analysis (score, key relationship, BPM
     delta, energy direction, mix tip, and a needs_attention flag for weak or
-    energy-dropping joins). Greedy and local — a good draft, not a proven optimum.
-    Requires the library database."""
+    energy-dropping joins). Greedy and local — a good draft, not a proven optimum. Tracks are
+    drawn from `crate` (default: the server's active crate). Requires the library database."""
     try:
-        return await _run(_setlist_impl, seed_track_id, length, mode, energy, temperature)
+        return await _run(_setlist_impl, seed_track_id, length, mode, energy, temperature, crate)
     except Exception as e:
         return _error(f"Setlist build failed: {e}")
 
@@ -1158,14 +1229,17 @@ _EMOTION_FIELDS = {
 }
 
 
-def _find_by_emotion_impl(criteria: dict, limit: int) -> dict:
+def _find_by_emotion_impl(criteria: dict, limit: int, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
+    selector, _crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
     active = {k: v for k, v in criteria.items() if v is not None}
     if not active:
         return _error("Provide at least one emotional minimum, e.g. dark=0.5 or groovy=0.6.")
-    lib = analyze._load_library()
+    lib = analyze._load_library(crate=selector)
     matches = []
     for p, f in lib:
         score = 0.0
@@ -1197,17 +1271,19 @@ async def find_by_emotion(
     party: Annotated[Optional[float], Field(description="Min party/dancefloor energy [0–1].")] = None,
     danceable: Annotated[Optional[float], Field(description="Min neural danceability [0–1].")] = None,
     limit: Annotated[int, Field(description="Max tracks to return.")] = 25,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Find library tracks matching emotional criteria (e.g. dark AND hypnotic AND ~heavy).
 
     Every supplied minimum is ANDed; results are sorted by how strongly they match. Use for
     vibe-led queries like 'find me something dark and hypnotic'. Only tracks at pipeline
-    level ≥ 4 carry these axes. Requires the library database."""
+    level ≥ 4 carry these axes. Scoped to `crate` (default: the server's active crate).
+    Requires the library database."""
     criteria = {"aggressive": aggressive, "dark": dark, "groovy": groovy, "energetic": energetic,
                 "heavy": heavy, "meditative": meditative, "space": space, "party": party,
                 "danceable": danceable}
     try:
-        return await _run(_find_by_emotion_impl, criteria, limit)
+        return await _run(_find_by_emotion_impl, criteria, limit, crate)
     except Exception as e:
         return _error(f"Emotional search failed: {e}")
 
@@ -1215,11 +1291,14 @@ async def find_by_emotion(
 # ════════════════════════════════════════════════════════════
 #  CATEGORY 5 — LIBRARY MANAGEMENT
 # ════════════════════════════════════════════════════════════
-def _overview_impl() -> dict:
+def _overview_impl(crate=None) -> dict:
     err = _require_db()
     if err:
         return err
-    lib = analyze._load_library()
+    selector, _crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
+    lib = analyze._load_library(crate=selector)
     if not lib:
         return {"track_count": 0, "note": "Library is empty — index the crate first."}
     bpms = [f.bpm for _, f in lib if f.bpm > 0]
@@ -1248,23 +1327,29 @@ def _overview_impl() -> dict:
 
 
 @mcp.tool()
-async def library_overview() -> dict:
-    """High-level stats for the whole indexed library.
+async def library_overview(
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
+) -> dict:
+    """High-level stats for the indexed library.
 
     Track count, ML pipeline-level distribution, BPM range + 10-BPM histogram, Camelot key
     distribution, and average mood scores where available. Use to understand the shape of
-    the collection before querying it. Requires the library database."""
+    the collection before querying it. Scoped to `crate` (default: the server's active
+    crate). Requires the library database."""
     try:
-        return await _run(_overview_impl)
+        return await _run(_overview_impl, crate)
     except Exception as e:
         return _error(f"Overview failed: {e}")
 
 
-def _list_tracks_impl(limit, offset) -> dict:
+def _list_tracks_impl(limit, offset, crate=None) -> dict:
     err = _require_db()
     if err:
         return err
-    rows = database.list_tracks(analyzed_only=True)
+    _selector, crate_id, cerr = _crate_scope(crate)
+    if cerr:
+        return cerr
+    rows = database.list_tracks(analyzed_only=True, crate_id=crate_id)
     page = rows[offset:offset + limit]
     return {"total": len(rows), "offset": offset, "limit": limit,
             "tracks": [_row_brief(r) for r in page]}
@@ -1274,13 +1359,15 @@ def _list_tracks_impl(limit, offset) -> dict:
 async def list_tracks(
     limit: Annotated[int, Field(description="Page size.")] = 50,
     offset: Annotated[int, Field(description="Offset for pagination.")] = 0,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """List indexed tracks with basic metadata (filename, BPM, Camelot, key, level), paginated.
 
     No curves or vectors. Use to enumerate the collection; page with limit/offset on large
-    libraries. Requires the library database."""
+    libraries. Scoped to `crate` (default: the server's active crate). Requires the library
+    database."""
     try:
-        return await _run(_list_tracks_impl, limit, offset)
+        return await _run(_list_tracks_impl, limit, offset, crate)
     except Exception as e:
         return _error(f"Listing failed: {e}")
 
@@ -1392,17 +1479,19 @@ async def recommend_avoiding_session(
     n: Annotated[int, Field(description="How many picks to return.")] = 5,
     energy: Annotated[str, Field(description="Energy direction: 'up' | 'stable' | 'down'.")] = "stable",
     temperature: Annotated[float, Field(description="0.0 deterministic; higher = more variety.")] = 0.0,
+    crate: Annotated[Optional[str], Field(description=_CRATE_DESC)] = None,
 ) -> dict:
     """Recommend next tracks that have NOT been played in this session.
 
     Same engine as get_recommendations, but it excludes every track already logged in the
-    session so you never suggest a repeat mid-set. Requires the library database."""
+    session so you never suggest a repeat mid-set. Candidates come from `crate` (default: the
+    server's active crate). Requires the library database."""
     s = SESSION_STATE["sessions"].get(session_id)
     if not s:
         return _error(f"No active session '{session_id}'. Call start_session first.")
     exclude = [t["track_id"] for t in s["tracks"]]
     try:
-        return await _run(_recommend_impl, track_id, mode, n, energy, temperature, exclude)
+        return await _run(_recommend_impl, track_id, mode, n, energy, temperature, exclude, crate)
     except Exception as e:
         return _error(f"Recommendation failed: {e}")
 

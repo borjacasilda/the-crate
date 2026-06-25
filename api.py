@@ -82,6 +82,17 @@ async def _lifespan(app):
                 limiter.total_tokens, database.POOL_MAX,
                 config.RECORDINGS_DIR, MP3_SUPPORTED)
     yield
+    # Ordered shutdown (A3): signal the live worker to stop and stop accepting new
+    # executor work, so a reload/quit doesn't leave a recognition loop + queued
+    # analysis running against a tearing-down process. wait=False: don't block the
+    # shutdown on an in-flight take/import — daemon threads exit with the process.
+    # The DB pool is left to process teardown on purpose (no close hook, and the
+    # reconnect layer must stay usable for any borrow still in flight).
+    with _LIVE_LOCK:
+        LIVE["running"] = False
+    _EXECUTOR.shutdown(wait=False)
+    _COVER_EXECUTOR.shutdown(wait=False)
+    logger.info("api STOP — live worker signalled, executors shut down")
 
 
 app = FastAPI(title="The Crate API", version="0.1.0",
@@ -109,6 +120,13 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 # Serialises every Essentia/TF touch (analysis is not thread-safe) AND the
 # post-stop pipeline as a whole, so two quick takes queue instead of colliding.
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thecrate-api")
+
+# Bounded pool for fire-and-forget Discogs cover re-searches after inline edits
+# (A5). Was an unbounded thread-per-edit; this caps concurrency (and idle threads)
+# so a rapid batch of edits can't spawn a thread storm hammering Discogs. Separate
+# from _EXECUTOR because it does NO Essentia/TF work — it must not queue behind a
+# take/import on the single TF worker.
+_COVER_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thecrate-cover")
 
 # ── In-memory job registry ────────────────────────────────────────────────────
 # job_id → {state, detail, result, error}. Lost on restart by design: a job is
@@ -181,6 +199,9 @@ class ListeningParams(BaseModel):
     """Partial update from the /listen dashboard — omitted fields keep their
     current value. One optional field per registered knob; a new dashboard
     parameter = one field here + one entry in LISTENING_PARAM_CATALOG."""
+    # Recommendation mode — the preset of modifier strengths (analyze.MODE_CONFIG).
+    # It is the BASE the energy direction and the penalizer toggles then layer on top.
+    mode: "str | None" = Field(default=None, pattern="^(safe|balanced|creative)$")
     energy: "str | None" = Field(default=None, pattern="^(up|stable|down)$")
     # {modifier_name: bool} — partial; merged into the current toggle state.
     modifiers: "dict | None" = None
@@ -487,7 +508,11 @@ def _process_take(job_id: str, audio: np.ndarray, sr: int, meta: dict) -> None:
     Order is deliberate: the irreplaceable artifact (the full take) is written
     FIRST, so an ingest/analysis failure can never cost the rip itself.
     """
-    job = JOBS[job_id]
+    # Grab the job dict under the lock so the lookup can't race _register_job's
+    # eviction; mutating the returned object afterwards is safe (active jobs are
+    # never evicted, and we hold the reference regardless). (A2)
+    with _JOBS_LOCK:
+        job = JOBS[job_id]
     try:
         if meta["keep_full_take"] and meta["formats"]:
             job["state"] = "saving"
@@ -619,7 +644,8 @@ def _process_import(job_id: str, paths: list, names: list, crate_id: str,
     batch. The temp dir is always cleaned at the end.
     """
     import shutil
-    job = JOBS[job_id]
+    with _JOBS_LOCK:                       # consistent read vs eviction (A2)
+        job = JOBS[job_id]
     imported, moved, skipped, failed = [], [], [], []
     try:
         existing = {row["filename"]: row for row in database.list_tracks()}
@@ -684,22 +710,30 @@ async def import_files(crate_id: str = Form(alias="crate"),
 
     tmp_dir = tempfile.mkdtemp(prefix="thecrate-import-")
     max_bytes = int(config.IMPORT_MAX_FILE_MB * 1024 * 1024)
+    max_total_bytes = int(config.IMPORT_MAX_TOTAL_MB * 1024 * 1024)
     paths, names = [], []
+    total_written = 0                             # cumulative across the whole upload (A4)
     for f in files:
         original = Path(f.filename).name          # Strip any client path part.
         dest = Path(tmp_dir) / _sanitize_filename(original)
         # Stream to disk in 1 MB chunks instead of f.read() the whole file into RAM
         # (M5): a big WAV rip would otherwise be fully buffered. Enforce the per-file
-        # cap as we go so an oversized upload is rejected (413) without buffering it.
+        # AND the aggregate cap as we go so an oversized/runaway upload is rejected
+        # (413) without buffering it or filling the disk.
         written = 0
         try:
             with dest.open("wb") as out:
                 while chunk := await f.read(1024 * 1024):
                     written += len(chunk)
+                    total_written += len(chunk)
                     if written > max_bytes:
                         raise HTTPException(
                             413, f"{original} exceeds the "
                                  f"{config.IMPORT_MAX_FILE_MB:g} MB per-file import limit.")
+                    if total_written > max_total_bytes:
+                        raise HTTPException(
+                            413, f"this import exceeds the "
+                                 f"{config.IMPORT_MAX_TOTAL_MB:g} MB total upload limit.")
                     out.write(chunk)
         except HTTPException:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -777,9 +811,12 @@ def _live_recommendations(features, exclude_path: str,
     handler (the PATCH /listening/params refresh).
     """
     with _PARAMS_LOCK:
+        mode = LISTENING_PARAMS.get("mode", "balanced")
         energy = LISTENING_PARAMS["energy"]
         mods = dict(LISTENING_PARAMS.get("modifiers", {}))
-    strengths = analyze._ensure_strengths("balanced")
+    # Mode is the BASE preset of modifier strengths; the energy direction and the
+    # penalizer toggles below layer on top of it (a toggle only ever disables).
+    strengths = analyze._ensure_strengths(mode)
     strengths.energy_target = analyze.ENERGY_TARGETS.get(energy, 0.0)
     # Disabled penalizers → strength 0.0 (neutral 1.0 in mix_score, no penalty).
     for m, on in mods.items():
@@ -796,7 +833,7 @@ def _live_recommendations(features, exclude_path: str,
         on_spot = []
     exclude = ([exclude_path] if exclude_path else []) + on_spot
     scored = analyze.score_candidates(
-        features, mode="balanced", strengths=strengths,
+        features, mode=mode, strengths=strengths,
         exclude_paths=exclude or None,
         crate=crate_id if crate_id else "__active__")
     picks = analyze.sample_by_score(scored, 3, 0.0)
@@ -837,7 +874,7 @@ def _live_recommendations(features, exclude_path: str,
 
 
 def _apply_recognition(res) -> None:
-    """Fold one chain pass into the lock state machine (under _LIVE_LOCK).
+    """Fold one chain pass into the lock state machine.
 
     Fuzzy (EffNet) matches are DEBOUNCED before they may lock + log: the nearest
     crate neighbour is essentially the top recommendation, so a single transitional
@@ -847,7 +884,16 @@ def _apply_recognition(res) -> None:
     one — fast where it is safe, patient where it is risky. The tracklist also
     de-dupes: a record is never logged twice back-to-back (a re-lock after a brief
     drop), though the same track may reappear later in the set with a gap between.
+
+    Concurrency (A1): only the single _live_worker thread calls this, so _LIVE_LOCK
+    here guards READERS (the 700 ms status poll, PATCH /listening/params), not
+    re-entrancy. The two DB touches on a new lock — the recommendation recompute and
+    the session log — are therefore done OUTSIDE the lock: the banner/tracklist commit
+    under a short lock, then the I/O runs unlocked, then the recs are written back
+    under a second short lock (guarded so a stop/relock mid-compute can't store stale
+    picks). This keeps the lock hold time at in-memory speed regardless of DB latency.
     """
+    recompute = None        # set to a snapshot when a new lock needs recs + a log
     with _LIVE_LOCK:
         if res is not None and res.identified:
             current = LIVE["track"]["track_id"] if LIVE["track"] else None
@@ -863,30 +909,24 @@ def _apply_recognition(res) -> None:
                 if LIVE["pending_n"] < needed:
                     return                        # not stable yet: hold the lock, log nothing
                 LIVE["pending_id"], LIVE["pending_n"] = None, 0
-                # Stable → this is the new lock; recommendations recompute here only.
+                # Stable → commit the new lock now; defer the DB work (recs + log).
                 LIVE["track"] = _track_json(res)
                 LIVE["locked_at"] = datetime.now().isoformat(timespec="seconds")
-                try:
-                    LIVE["recommendations"] = _live_recommendations(
-                        res.features, res.crate_path, LIVE["crate_id"])
-                except Exception as e:
-                    logger.warning("live recommendations failed: %s", e)
-                    LIVE["recommendations"] = []
+                LIVE["recommendations"] = []      # filled by the unlocked recompute below
                 # Dedup: skip when the same record is already the last logged entry
                 # (a re-lock); a genuine replay later in the set is not adjacent, so
                 # it still logs.
                 tl = LIVE["tracklist"]
-                if not tl or tl[-1]["track_id"] != res.track_id:
-                    entry = {**LIVE["track"], "position": len(tl) + 1,
-                             "identified_at": LIVE["locked_at"],
-                             "detected_by": res.strategy}
-                    tl.append(entry)
-                    if LIVE["session_id"]:
-                        try:
-                            database.log_track_played(LIVE["session_id"], res.track_id,
-                                                      detected_by=res.strategy)
-                        except Exception as e:
-                            logger.warning("session log failed: %s", e)
+                should_log = not tl or tl[-1]["track_id"] != res.track_id
+                if should_log:
+                    tl.append({**LIVE["track"], "position": len(tl) + 1,
+                               "identified_at": LIVE["locked_at"],
+                               "detected_by": res.strategy})
+                recompute = {
+                    "features": res.features, "crate_path": res.crate_path,
+                    "crate_id": LIVE["crate_id"], "session_id": LIVE["session_id"],
+                    "track_id": res.track_id, "strategy": res.strategy, "log": should_log,
+                }
             LIVE["status"] = "locked"
             LIVE["confidence"] = round(res.confidence, 3)
             LIVE["strategy"] = res.strategy
@@ -903,6 +943,27 @@ def _apply_recognition(res) -> None:
                 LIVE["pending_id"], LIVE["pending_n"] = None, 0   # drop a stale half-vote
         else:
             LIVE["status"] = "searching"
+
+    if recompute is None:
+        return
+    # ── DB I/O for the new lock, OUTSIDE _LIVE_LOCK (A1) ──
+    try:
+        recs = _live_recommendations(recompute["features"], recompute["crate_path"],
+                                     recompute["crate_id"])
+    except Exception as e:
+        logger.warning("live recommendations failed: %s", e)
+        recs = []
+    if recompute["log"] and recompute["session_id"]:
+        try:
+            database.log_track_played(recompute["session_id"], recompute["track_id"],
+                                      detected_by=recompute["strategy"])
+        except Exception as e:
+            logger.warning("session log failed: %s", e)
+    # Store the picks only if the SAME track is still locked — a stop/relock could
+    # have moved on while we computed (mirrors the PATCH refresh guard).
+    with _LIVE_LOCK:
+        if LIVE["track"] and LIVE["track"]["track_id"] == recompute["track_id"]:
+            LIVE["recommendations"] = recs
 
 
 def _make_live_embedder(audio16):
@@ -973,6 +1034,19 @@ def _live_worker():
 _TOGGLEABLE_MODIFIERS = ("bpm", "harmonic", "transition", "mood", "emotional", "density")
 
 LISTENING_PARAM_CATALOG = [
+    {
+        # Broad preset (analyze.MODE_CONFIG): sets every modifier's strength at once.
+        # Energy direction + penalizer toggles below then layer on top of it.
+        "name": "mode", "label": "Mode", "type": "choice",
+        "default": "balanced",
+        "options": [
+            {"value": "safe",     "label": "Safe"},
+            {"value": "balanced", "label": "Balanced"},
+            {"value": "creative", "label": "Creative"},
+        ],
+        "hint": "Safe = tight (BPM/key amplified). Creative = the EffNet vibe leads. "
+                "Energy and the penalizers below fine-tune this preset.",
+    },
     {
         "name": "energy", "label": "Energy", "type": "choice",
         "default": "stable",
@@ -1462,15 +1536,13 @@ def _refresh_cover_bg(track_id: str) -> None:
     thread (Discogs is slow and may be rate-limited / unauthorised). Best-effort:
     enrich.refresh_cover does nothing when Discogs is unconfigured or a cover already
     exists, and any failure is swallowed so the edit response is never affected."""
-    import threading
-
     def _work():
         try:
             import enrich
             enrich.refresh_cover(track_id)
         except Exception as e:
             logger.warning("cover refresh failed for %s: %s", track_id, e)
-    threading.Thread(target=_work, daemon=True).start()
+    _COVER_EXECUTOR.submit(_work)          # bounded pool, not a fresh thread (A5)
 
 
 class TrackUpdate(BaseModel):

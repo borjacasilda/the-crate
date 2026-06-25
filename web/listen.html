@@ -13,9 +13,10 @@
   .input-src { font-family: var(--mono); font-size: .82rem; color: var(--text);
                display: flex; align-items: center; gap: .5rem; }
   .input-src .badge { flex: 0 0 auto; }
-  /* ENERGY choice buttons: uniform + a bit wider than the default segmented control.
-     Scoped by data-param so the re-check Off/On toggle keeps its size. */
-  .seg[data-param="energy"] button { min-width: 6.5rem; }
+  /* MODE + ENERGY choice buttons: uniform + a bit wider than the default segmented
+     control. Scoped by data-param so the re-check Off/On toggle keeps its size. */
+  .seg[data-param="energy"] button,
+  .seg[data-param="mode"] button { min-width: 6.5rem; }
 
   /* ── recognition banner: alive while a track is locked, fades on blend ── */
   .banner { border: 1px solid var(--line); background: var(--surface);
