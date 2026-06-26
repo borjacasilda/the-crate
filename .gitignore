@@ -59,3 +59,7 @@ CLAUDE.md
 .DS_Store
 *.swp
 *.swo
+
+# ── Presentation deck: hosted as a GitHub Release asset, kept OUT of git history
+#    (docs/*.md stay tracked; only the heavy PDF is ignored). ──
+docs/*.pdf
